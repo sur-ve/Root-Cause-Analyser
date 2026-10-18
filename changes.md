@@ -31,20 +31,26 @@ Tracking doc — the full plan lives in [PLAN.md](PLAN.md).
 * [x] **End-to-end run validated** — feature → detect → graph → report in ~6 s;
       graph has 410 edges / 236 nodes from the sampled tracker.
 
-## Done (Phase 2 complete — 2026-10-18)
+## Done (Phase 2 complete/verified — 2026-10-18)
 
 * [x] **Baseline runs** — 6 `default` runs collected; **28 789 Normal rows**.
-* [x] **Fault matrix** — all 10 stressors recollected (16 runs, 69 682 rows);
-      `memStressor2` was a 2 s blip (see OOM fix) and is being recollected.
-* [x] **Detector** — retrained on all baselines: Normal FPR 5.2 %;
-      `detectorBenchmark.py` OCSVM F1 0.981 / FPR 5.4 % (vs IF 0.826 / LOF 0.916);
-      `overallBenchmark.py` held-out F1 0.979 / FPR 5.8 %, 10/10 classes ≈ 1.0.
+* [x] **Fault matrix** — all 10 stressors collected (16 runs, 71 777 rows).
+      `memStressor2` recollected after the OOM-probe fix: 39 s run, 36
+      OOM-kill events (`oom_kill_process` / `__oom_kill_process`), all
+      victims `stress-ng-vm`; `oom_time` populated as well. (First recollect
+      failed because bpftrace attach latency outlasted the 2 s stressor and
+      systemd stopped the scope on the first OOM kill — fixed by running each
+      allocation attempt in its own scope from a supervisor loop.)
+* [x] **Detector** — retrained on all baselines (35 features): Normal FPR 5.2 %;
+      `detectorBenchmark.py` OCSVM F1 0.982 / FPR 5.4 % (vs IF 0.867 / 8.9 %,
+      LOF 0.919 / 26.1 %); `overallBenchmark.py` held-out F1 0.981 / FPR 5.7 %
+      (test FPs 488, FNs 1), per-class recall ≈ 1.0 (9/10 at 1.000, 1 at 0.999).
 * [x] **Cause classification (2.5)** — new shared module `diagnosis.py`
       (label-free; tiers: culprit comm → OOM-kill event → `stress-ng-vm` →
       metric signatures → unknown) used by the explainer and both benchmarks;
       old 18 % row-level heuristic deleted. Window-level agreement:
-      **99.4 %** over fault-active windows / 88.0 % over all fault windows;
-      episode level (17 reports): 10/11 correct (miss = broken OOM run).
+      **99.4 %** over fault-active windows (171/203) / 88.7 % over all fault
+      windows; episode level (17 reports): **11/11 fault episodes correct**.
 
 ## Done (Phase 4.1–4.3 scripts, dry-run tested)
 
@@ -55,11 +61,6 @@ Tracking doc — the full plan lives in [PLAN.md](PLAN.md).
 
 ## In progress / next
 
-* **OOM path** — `probes.bt` now counts `oom_kill_process` /
-  `__oom_kill_process` (`oom_kills` metric); guarded `memStressor2` now loops
-  2.5G allocations under `MemoryMax=2G / MemorySwapMax=256M` for repeated
-  in-cgroup OOM kills. Needs: `sudo bash testbed/preflight.sh` (validates the
-  new kprobes) + `sudo bash testbed/run_fault.sh memStressor2`, then rebuild.
 * **Phase 3 daemon rewrite** — `rcaDaemon.py` still passes `run_id` where
   stages expect file paths, so background analysis never runs; two-phase
   `--learn`/`--monitor`, incremental scoring, `data/alerts.jsonl`, retention,

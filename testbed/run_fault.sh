@@ -68,11 +68,12 @@ case "$RUN_ID" in
         STRESSOR_CMD="$MEM_GUARD stress-ng --vm 2 --vm-bytes 70% --vm-keep --timeout 60s"
         ;;
     memStressor2)
-        # ~150%-of-cgroup-limit allocation, repeated: each stress-ng worker is
-        # reclaimed against briefly and then OOM-killed *inside* the 2G cgroup
-        # (MemorySwapMax=256M bounds host swap use). The loop respawns it so the
-        # run shows repeated OOM kills + reclaim pressure instead of one 2s blip.
-        STRESSOR_CMD="systemd-run --scope -p MemoryMax=2G -p MemorySwapMax=256M bash -c 'for i in {1..15}; do stress-ng --vm 1 --vm-bytes 2500M --timeout 4s; done'"
+        # One guarded scope per allocation attempt: each stress-ng worker is
+        # reclaimed against briefly and OOM-killed *inside* its own 2G scope
+        # (MemorySwapMax=256M bounds host swap use). The supervisor loop runs
+        # outside the scope, so the scope's OOM failure cannot end the run —
+        # the collector sees ~40s of repeated kills instead of one 2s blip.
+        STRESSOR_CMD="bash -c 'for i in {1..20}; do systemd-run --quiet --scope -p MemoryMax=2G -p MemorySwapMax=256M stress-ng --vm 1 --vm-bytes 2500M --timeout 4s; done'"
         ;;
     memStressor3)
         STRESSOR_CMD="$MEM_GUARD stress-ng --brk 2 --timeout 60s"

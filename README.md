@@ -260,13 +260,13 @@ On `sched_wakeup` / `sched_wakeup_new`, emits JSONL:
 
 Outputs columns `anomaly_score` (decision function; negative ≈ anomaly) and `predicted_anomaly` (True when `predict == -1`). Writes `data/scored_features.csv` and prints per-class flagged rates / Normal FPR.
 
-**Why OneClassSVM?** `detectorBenchmark.py` on the labeled stressor set showed (current corpus, 69 682 rows):
+**Why OneClassSVM?** `detectorBenchmark.py` on the labeled stressor set showed (current corpus, 71 777 rows):
 
 | Model | F1 | FPR (Normal) | Notes |
 |---|---|---|---|
-| **OneClassSVM** | **0.981** | **5.4 %** | Selected for production |
-| LocalOutlierFactor | 0.916 | 26.1 % | Near-perfect recall, too many false positives |
-| IsolationForest | 0.826 | 8.8 % | Previous baseline |
+| **OneClassSVM** | **0.982** | **5.4 %** | Selected for production |
+| LocalOutlierFactor | 0.919 | 26.1 % | Near-perfect recall, too many false positives |
+| IsolationForest | 0.867 | 8.9 % | Previous baseline |
 
 #### `detectorBenchmark.py`
 
@@ -474,7 +474,7 @@ Use stressors as ground truth:
 | Normal FPR | Low (OneClassSVM 5.4 % on the current corpus) |
 | Stressor recall | 10/10 fault classes ≈ 1.0 (held-out test) |
 | Graph candidates | Often include stressor-related `comm` (e.g. `stress-ng-*`, `fio`) |
-| Cause family (reports) | 99.4 % over fault-active windows; 88.0 % incl. transition windows |
+| Cause family (reports) | 99.4 % over fault-active windows; 88.7 % incl. transition windows |
 
 Re-run `detectorBenchmark.py` / `overallBenchmark.py` after changing features or detector hyperparameters.
 
@@ -486,14 +486,15 @@ From `detectorBenchmark.py` / production-style full-data scoring (re-run after d
 
 | Detector | Accuracy | F1 | FPR | Role |
 |---|---|---|---|---|
-| **OneClassSVM** | 0.977 | 0.981 | 5.4 % | **Production** |
-| LocalOutlierFactor | 0.892 | 0.916 | 26.1 % | Comparison |
-| IsolationForest | 0.815 | 0.826 | 8.8 % | Prior baseline |
+| **OneClassSVM** | 0.978 | 0.982 | 5.4 % | **Production** |
+| LocalOutlierFactor | 0.895 | 0.919 | 26.1 % | Comparison |
+| IsolationForest | 0.851 | 0.867 | 8.9 % | Prior baseline |
 
-Held-out (`overallBenchmark.py`, 30 % test): OCSVM F1 0.979, FPR 5.8 %,
-per-class recall 1.0 for 9/10 fault classes and 0.99 for the 10th.
-Label-free cause-family agreement: **99.4 %** over fault-active windows
-(159/191; the rest are transition windows without fault activity).
+Held-out (`overallBenchmark.py`, 30 % test): OCSVM F1 0.981, FPR 5.7 %,
+per-class recall 1.0 for 9/10 fault classes and 0.999 for the 10th
+(test FPs 488, FNs 1). Label-free cause-family agreement: **99.4 %** over
+fault-active windows (171/203; the rest are transition windows without fault
+activity). All 11 merged fault episodes classify to the correct family.
 
 Hold-out numbers (and TP/TN/FP/FN) are written to `data/overall_benchmark.json` when you run `overallBenchmark.py`.
 
@@ -515,7 +516,7 @@ Hold-out numbers (and TP/TN/FP/FN) are written to `data/overall_benchmark.json` 
 
 See `changes.md`:
 
-- Recollect `memStressor2` with the new OOM-kill probes (`oom_kills` metric) and re-verify the OOM path
+- Phase 3 daemon rewrite (`--learn`/`--monitor`, incremental scoring, alerts) and Phase 4 `evaluate.py` / demo scripts
 - Stronger filtering of noisy kernel wakeups (IRQ threads, kworkers)
 - Optional upgrade from TF-IDF to dense embeddings (would need an embedding model or API)
 - Tune OneClassSVM `nu` if Normal FPR drifts after new data collection

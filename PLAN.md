@@ -332,7 +332,33 @@ Next: Phase 2 — collect `default` baselines, persist the OneClassSVM
   (~30–45 s of pressure + kill events instead of one 2 s blip).
   Needs: preflight (validates new probes) + `run_fault.sh memStressor2` recollect.
 
-Next: Phase 3 daemon rewrite; Phase 4 `evaluate.py` / demo scripts; recollect
-`memStressor2` and run the final validation matrix once the probe change is
-confirmed by preflight.
+### 2026-10-18 (later 4) — OOM path verified end-to-end; corpus finalized
+
+- [x] Preflight passed with the new `oom_kill_process` / `__oom_kill_process`
+      kprobes, but the first recollect still produced a 2 s blip. Root cause
+      had two independent parts, found from the systemd journal:
+      1. bpftrace attach latency (~3.5 s) exceeded the 2 s stressor — the OOM
+         kill happened *before the first probe window was even recorded*;
+      2. systemd's default OOM policy stopped the whole transient scope on the
+         first kill (`Failed with result 'oom-kill'`), so the bash loop died
+         with it.
+- [x] Fix: guarded `memStressor2` now runs a **supervisor loop outside the
+      scope** — one fresh `systemd-run --scope` per 2.5G allocation attempt
+      (`MemoryMax=2G`, `MemorySwapMax=256M`, `--timeout 4s`), so a scope's OOM
+      failure cannot end the run. Recollect: **39.0 s stressor, 36 OOM-kill
+      events** across 12/15 windows, every victim `stress-ng-vm`;
+      `oom_time` is populated too (the memcg path does pass through
+      `out_of_memory()` after all — journal stack trace confirmed).
+- [x] Corpus rebuilt (71 777 rows; OOM Kill 2 725 rows) and the 35-feature
+      detector retrained: `detectorBenchmark.py` OCSVM F1 **0.982** /
+      FPR 5.4 % (IF 0.867 / 8.9 %, LOF 0.919 / 26.1 %);
+      `overallBenchmark.py` held-out TEST F1 **0.981** / FPR 5.7 %
+      (test FPs 488, FNs 1), per-class recall 1.0 for 9/10 classes, 0.999
+      for the 10th.
+- [x] Cause classification: **99.4 %** over fault-active windows (171/203),
+      88.7 % over all fault windows; **all 11 merged fault episodes classify
+      correctly** (previously 10/11 — the OOM miss is fixed).
+
+Next: Phase 3 daemon rewrite; Phase 4 `evaluate.py` / demo scripts; final
+full-matrix validation run as the demo corpus.
 
