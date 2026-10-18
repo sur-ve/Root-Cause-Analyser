@@ -525,6 +525,10 @@ class Monitor:
             query = ragExplainer.build_retrieval_query(summary)
             docs = self.corpus.retrieve(query, top_k=2) if query.strip() else []
             report_text = ragExplainer.synthesize_grounded_report(summary, docs)
+            if ragExplainer.is_llm_enabled():
+                llm_rev = ragExplainer.review_report_with_llm(report_text)
+                if llm_rev:
+                    report_text += f"\nLLM review:\n{llm_rev}\n"
             diag = diagnosis.classify_cause(summary.get('top_metrics', {}),
                                             summary.get('top_processes', []))
             log(f"stage explain ok: {ep_id} family={diag['family']} "

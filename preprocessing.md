@@ -1,6 +1,6 @@
 # Preprocessing Steps
 
-All transforms applied before anomaly detection and causal analysis, in pipeline order.
+All transforms applied before anomaly detection, causal analysis, and report generation, in pipeline order.
 
 ---
 
@@ -8,76 +8,81 @@ All transforms applied before anomaly detection and causal analysis, in pipeline
 
 ### 1.1 Procfs delta conversion (`procExtractor.py`)
 
-- Primer read of `/proc/vmstat` establishes a baseline.
-- Each 1s sample stores **deltas**, not absolute counters:
+- Primer read of `/proc/vmstat` establishes a baseline delta.
+- Each 1 s sample stores **deltas**, not absolute counters:
   - `allocstall_count`, `major_fault_count`, `swap_in_count`, `swap_out_count`, `oom_kill_count`
-- `allocstall_*` zones (`dma`, `dma32`, `normal`, `movable`) are **summed** into a single `allocstall` before differencing.
+- Deltas are clamped at 0 to guard against counter resets.
+- All available `allocstall_*` zones (`dma`, `dma32`, `normal`, `movable`) are **summed** into a single `allocstall` before differencing (tolerating missing zones on older/newer kernels).
 - PSI text from `/proc/pressure/{cpu,memory,io}` is parsed into nested dicts (`some` / `full` × `avg10` / `avg60` / `avg300` / `total`).
-- Each record is stamped with UNIX `time.time()` and written as JSONL.
+- Each record is stamped with UNIX epoch `time.time()` and written as JSONL to `data/procfsData_<run_id>.jsonl`.
 
 ### 1.2 Probe window alignment (`probeExtractor.py`)
 
-- bpftrace map dumps are buffered until an `"END"` marker (every ~3s).
-- Per-`comm` map entries are **flattened** into `processes[comm][metric]`.
-- First window start is backdated to `fin_timestamp - 3.0` when attach delay would otherwise skew the start.
-- Subsequent windows use the previous END time as `window_start`.
-- Non-JSON bpftrace chatter (e.g. “Attaching …”) is dropped.
+- `probes.bt` emits nanosecond clock markers (`BEGIN_NS` / `WINDOW_END_NS`) around each ~3 s map accumulation window.
+- `probeExtractor.py` pairs window bounds with `boot_time_epoch` from `data/meta_<run_id>.json`:
+  - `window_start = boot_time_epoch + (begin_ns / 1e9)`
+  - `window_end = boot_time_epoch + (end_ns / 1e9)`
+- Consecutive windows abut accurately without magic constants or attach delay skew.
+- Per-`comm` map entries are flattened into `processes[comm][metric]`.
+- Futex probes are filtered to blocking/waiting ops (0, 9, 11) to eliminate userspace fast-path noise.
+- Kernel OOM kill events (`oom_kill_process`, `__oom_kill_process`) are tracked directly via kprobes into `@oom_kills`.
+- Non-JSON bpftrace chatter is dropped.
 
-### 1.3 Run metadata (`parentProcess.py`)
+### 1.3 Run metadata & ground truth (`parentProcess.py`)
 
-- Writes `data/meta_<run_id>.json` with `boot_time_epoch`, `start_time`, and stressor command for later edge↔window alignment.
+- Writes `data/meta_<run_id>.json` containing `boot_time_epoch`, `start_time`, `end_time`, stressor command, and label.
+- Appends to `data/ground_truth.jsonl` with start/end timestamps and expected fault family (strictly for offline benchmark evaluation).
 
 ---
 
 ## 2. Feature extraction (`featureExtractor.py`)
 
-### 2.1 Run discovery
+### 2.1 Run discovery & label hygiene
 
-- Auto-discovers `data/probeData_*.jsonl` / matching `procfsData_*.jsonl`.
-- Skips missing, empty, or unparseable run pairs.
+- Auto-discovers matching pairs of `data/probeData_<run_id>.jsonl` and `data/procfsData_<run_id>.jsonl`.
+- Resolves run labels from `data/meta_<run_id>.json` first, then falls back to `labels.py` (`ROOT_CAUSES`), and finally to `Unlabeled` (no arbitrary `Custom (...)` tags).
 
 ### 2.2 Probe flattening
 
-- One row per `(window, process_comm)`.
-- System-level probe fields (non-process maps) are copied onto every process row in that window.
-- Adds `run_id` and human `root_cause` label from the stressor map (`default` → `Normal`).
+- Explodes probe `processes` map into one row per `(window, process_comm)`.
+- System-level probe fields (e.g. `oom_kills`, `futex_wait_count`, `sector_count`) are copied onto every process row in that window.
+- Adds `run_id`, `window_start`, `window_end`, `comm`, and `root_cause`.
 
-### 2.3 Procfs flattening
+### 2.3 Procfs flattening & temporal join
 
-- Nested PSI JSON is expanded with `pd.json_normalize(..., sep='_')`  
-  (e.g. `cpu.some.avg10` → `cpu_some_avg10`).
-
-### 2.4 Temporal join
-
-- Both sides sorted by time.
-- `pd.merge_asof(..., direction='nearest', tolerance=2.0)` joins each probe window to the nearest PSI/vmstat sample within **2 seconds**.
-- Concatenates all runs → `data/combined_features.csv`.
+- Nested PSI JSON is expanded with `pd.json_normalize(..., sep='_')` (e.g. `cpu.some.avg10` → `cpu_some_avg10`).
+- Both datasets are sorted by timestamp.
+- `pd.merge_asof(..., direction='nearest', tolerance=2.0)` joins each probe window row to the nearest PSI/vmstat sample within **2 seconds**.
+- All runs are concatenated into `data/combined_features.csv`.
 
 ---
 
 ## 3. Anomaly-detection input prep (`anomalyDetection.py`)
 
-Production detector: **OneClassSVM** (`kernel='rbf'`, `nu=0.05`), selected after
-`detectorBenchmark.py` comparison against IsolationForest and LocalOutlierFactor.
+Production detector: **OneClassSVM** (`kernel='rbf'`, `nu=0.05`), selected after `detectorBenchmark.py` comparison against IsolationForest and LocalOutlierFactor.
 
 ### 3.1 Column selection
 
-- Drops non-features: `window_start`, `window_end`, `timestamp`, `comm`, `root_cause`, `run_id`.
-- Keeps **numeric** columns only (`select_dtypes(include=['number'])`).
+- Drops non-feature identifiers: `window_start`, `window_end`, `timestamp`, `comm`, `root_cause`, `run_id`.
+- Keeps **numeric** columns only (`select_dtypes(include=['number'])`) — exactly 35 numeric metrics in the production feature set.
 
 ### 3.2 Missing-value fill
 
-- `fillna(0)` on the feature matrix (sparse probe metrics absent for idle processes become zeros).
+- `fillna(0)` on the numeric feature matrix (metrics absent for idle processes in a given window become zeros).
 
-### 3.3 Training subset
+### 3.3 Training subset & artifact persistence
 
-- Prefer rows with `root_cause == 'Normal'` when ≥ 10 exist; otherwise train on all rows.
-- Training set is capped at 3000 rows for RBF tractability.
+- Production model is trained **strictly on Normal rows** (`root_cause == 'Normal'`).
+- Refuses to train if fewer than 50 Normal rows exist (prevents training on corrupted/insufficient baselines).
+- Normal training set is capped at 3 000 rows for RBF kernel tractability.
+- `StandardScaler` is fit on the Normal subset and applied before fitting the OneClassSVM.
+- Persists scaler, model, feature column list, and training metadata to `data/model/ocsvm.joblib`.
 
-### 3.4 Feature scaling
+### 3.4 Scoring
 
-- `StandardScaler` is fit on the Normal training subset and applied to all rows
-  before OneClassSVM fit/predict (required for RBF kernel geometry).
+- Production scoring (`--score`) aligns input columns to the trained feature list, fills missing columns with zeros, and applies the saved `StandardScaler`.
+- Adds `anomaly_score` (decision function) and `predicted_anomaly` (True when `predict == -1`).
+- Writes `data/scored_features.csv`.
 
 ---
 
@@ -85,35 +90,68 @@ Production detector: **OneClassSVM** (`kernel='rbf'`, `nu=0.05`), selected after
 
 ### 4.1 Anomaly window merge
 
-- Filters `predicted_anomaly == True`.
-- Deduplicates by `(window_start, window_end)`.
-- Pads ±1s and **merges overlapping** intervals.
+- Filters rows where `predicted_anomaly == True`.
+- Merges overlapping anomaly intervals **per run** (±1 s pad) into contiguous anomaly episodes.
 
-### 4.2 Wakeup edge hygiene
+### 4.2 Per-run edge alignment & noise filtering
 
-- Converts bpftrace `nsecs`-since-boot to epoch via `boot_time_epoch` (meta file or reboot-aware inference).
-- Drops noise comms: `swapper/*`, `bpftrace`, `ksoftirqd/*`, `migration/*`, `rcu_*`, `cpuhp/*`.
-- Keeps only edges whose epoch timestamp falls inside a merged anomaly window.
+- Reads per-run edge file `data/edges_<run_id>.jsonl` collected with 1-in-100 sampling (`wakeupTracker.bt`) or 1-in-1000 sampling in daemon mode (`wakeupTrackerMonitor.bt`).
+- Converts edge nanoseconds-since-boot to epoch using `boot_time_epoch` from `data/meta_<run_id>.json`.
+- Filters out kernel worker and idle noise: `swapper/*`, `bpftrace`, `ksoftirqd/*`, `migration/*`, `rcu_*`, `cpuhp/*`.
+- Retains only edges whose timestamp falls inside the merged anomaly window.
+- Builds a directed graph: **Wakee → Waker** (blocked task points to who unblocked it).
+- Identifies candidate roots as terminal blockers (`in_degree > 0` and `out_degree == 0`).
+- Writes `data/causal_summaries.json` and `data/causal_graphs.json`.
 
 ---
 
 ## 5. Explainer prep (`ragExplainer.py`)
 
-- Knowledge markdown under `knowledge/` is TF-IDF indexed (`stop_words='english'`).
-- Retrieval query is built from labeled causes, candidate roots, causal paths, and (if unlabeled) metric heuristics.
-- No further numeric feature scaling is applied beyond the steps above.
+### 5.1 Knowledge indexing
+
+- Runbook documents in `knowledge/*.md` are indexed using `TfidfVectorizer(stop_words='english')`.
+
+### 5.2 Label-free retrieval query construction
+
+- Retrieval queries are constructed from candidate roots, sample causal dependency paths, and keyword tokens from the shared `diagnosis.py` classifier (`QUERY_TOKENS`).
+- **Ground-truth labels are never used** for retrieval or classification — diagnosis relies entirely on observed runtime evidence.
+
+### 5.3 Classification & report synthesis
+
+- `diagnosis.classify_cause()` evaluates evidence across deterministic tiers:
+  1. Primary culprit comm identity (`fio`, `stress-ng-cpu/futex/dentr/brk`)
+  2. Kernel OOM-kill tracepoint event (`oom_kills > 0` or `oom_kill_count > 0`)
+  3. Memory stressor identity (`stress-ng-vm`)
+  4. Metric signatures (futex wait time, locktime, PSI mem + major faults, swap, sectors, CPU-PSI)
+  5. `unknown` fallback
+- Extracts remediation actions directly from the top-scoring matched runbook.
+- Writes human-readable reports to `data/rca_report.txt` and structured data to `data/rca_report.json`.
+
+### 5.4 Bounded LLM review layer (optional)
+
+- If `RCA_LLM_API_KEY` or a local endpoint (`RCA_LLM_BASE_URL`) is configured, queries an OpenAI-compatible endpoint or local Ollama instance (`/v1/chat/completions` with `/api/chat` fallback).
+- Strictly grounded prompt requires the model to reason only on the cited metrics and graph evidence, preventing hallucinations.
+- If disabled or if the network call fails, the grounded template report is used without interruption.
+
+---
+
+## 6. Daemon incremental preprocessing (`rcaDaemon.py`)
+
+- **Offset tracking:** Per-run file byte offsets are tracked in `data/daemon_state.json`. Each 30 s cycle reads only newly appended bytes from `probeData_*.jsonl` and `procfsData_*.jsonl`.
+- **Window-level anomaly rule:** A 3 s window (~290 process rows) is flagged as anomalous iff **≥ 50% of its rows** are flagged by the OneClassSVM (`--flag-fraction`). This eliminates idle false alerts (baselines peak at 0.44; fault windows are ≥ 0.94).
+- **Episode lifecycle:** Consecutive anomalous windows merge into an episode; once an episode cools down (or upon cycle close), graph analysis and grounded RAG explanation are executed in-process.
+- **Alert emission:** Appends structured JSON lines to `data/alerts.jsonl` and appends readable reports to `data/rca_report.txt`.
 
 ---
 
 ## Summary
 
-| Stage | Key preprocessing |
-|---|---|
-| Procfs | Counter → delta; zone sum; PSI parse |
-| Probes | Map flatten; first-window time fix |
-| Features | Per-process explode; nearest-time join (2s); label |
-| Detector | Numeric select; NaN→0; Normal-only train; StandardScaler; OneClassSVM |
-| Graphs | Overlap merge; boot-time align; noise filter |
-| RAG | TF-IDF corpus index |
-
-Production path uses **StandardScaler + OneClassSVM**. `detectorBenchmark.py` still compares IsolationForest (unscaled) and LOF (scaled) for regression checks.
+| Stage | Input | Key preprocessing | Output |
+|---|---|---|---|
+| Procfs | `/proc/pressure`, `/proc/vmstat` | Sum zones, compute deltas, clamp ≥ 0, parse PSI | `data/procfsData_<run_id>.jsonl` |
+| Probes | `probes.bt` map stream | `BEGIN_NS`/`WINDOW_END_NS` clock align, flatten per comm | `data/probeData_<run_id>.jsonl` |
+| Features | Probe + procfs JSONL | Per-process explode, nearest-time join (2 s), label hygiene | `data/combined_features.csv` |
+| Detector | Features CSV | Select 35 numeric metrics, `fillna(0)`, `StandardScaler`, OneClassSVM | `data/scored_features.csv`, `ocsvm.joblib` |
+| Graphs | Scored CSV + sampled edges | Per-run merge (±1 s), boot epoch align, noise filter | `data/causal_summaries.json`, `graphs.json` |
+| RAG | Causal summaries + `knowledge/` | Label-free query, TF-IDF cosine sim, `diagnosis.py` tiers, optional LLM review | `data/rca_report.txt`, `rca_report.json` |
+| Daemon | Streaming collectors | Per-run byte offsets, ≥ 50% row rule, episode merge, alert stream | `data/alerts.jsonl`, `daemon_status.json` |

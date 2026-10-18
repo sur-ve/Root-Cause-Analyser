@@ -153,14 +153,15 @@ testbed/
 | 4.6 `demo_live.sh` | monitor + single `cpuStressor1` (safe, 45 s); alert must appear ≤ 1 cycle after fault | end-to-end live proof |
 | 4.7 Honest measurement | Top-1 family accuracy computed on the **label-free** path (metrics + graph + retrieval), never from `labeled_causes` | numbers stand up to scrutiny |
 
-### Phase 5 — Optional LLM layer + final docs (≈½ day, decide)
+### Phase 5 — LLM layer & final documentation (complete)
 
-- Ollama is **not installed** (`command -v ollama` → missing). The timeline mentions LLM diagnosis;
-  the code has a disabled `query_local_ollama` hook.
-- If required for the evaluator: install Ollama + a small model, enable the hook with strict
-  grounding (graph + metrics + retrieved docs only), keep TF-IDF path as fallback.
-- Finish by refreshing `README.md`, `IMPLEMENTATION.md`, `preprocessing.md`, and adding
-  `DEMO.md` (evaluator click-through).
+| Task | Detail | Acceptance |
+|---|---|---|
+| 5.1 LLM review layer | OpenAI-compatible API (`RCA_LLM_API_KEY`) + local Ollama/vLLM (`RCA_LLM_BASE_URL`), native fallback, strictly bounded evidence prompt | Tested via `testbed/test_llm.py` (6/6 pass); template report is always-on fallback |
+| 5.2 Daemon LLM review | `rcaDaemon.py` invokes `review_report_with_llm` for finalized anomaly episodes | Daemon alerts include review when configured |
+| 5.3 Evaluator click-through | `DEMO.md` with step-by-step commands, expected outputs, verified metrics | Complete and tested |
+| 5.4 Testbed guide | `testbed/README.md` with script reference, fault matrix, env vars | Complete and verified |
+| 5.5 Docs refresh | `README.md`, `IMPLEMENTATION.md`, `preprocessing.md`, `changes.md` updated with measured metrics and modern architecture | All docs consistent and up to date |
 
 ---
 
@@ -192,6 +193,7 @@ Expected artefacts for the evaluator:
 ---
 
 ## 5. Risks & mitigations
+
 
 | Risk | Mitigation |
 |---|---|
@@ -395,7 +397,46 @@ Next: Phase 2 — collect `default` baselines, persist the OneClassSVM
 - [ ] Live smoke under sudo (user): preflight (now validates the monitor
       tracker) + short `--monitor --interval 20 --max-cycles 3` + `--learn` and
       an injected fault for the demo.
+      → Covered by `testbed/demo_live.sh` (requires root; see Phase 4).
 
-Next: Phase 4 `evaluate.py` / `demo_replay.py` / `demo_live.sh` /
-`testbed/README.md`; live daemon smoke; final full-matrix validation.
+### 2026-10-18 (later 6) — Phase 4 evaluator testbed complete
+
+- [x] 4.4 `testbed/evaluate.py`: ground truth vs pipeline output table;
+      `data/evaluation_results.csv` + `data/demo_metrics.json`.
+      Measured on the full 16-run corpus (offline):
+        - Fault detection recall: **1.000** (10/10 fault runs detected)
+        - Normal FPR: **0.000** (0 of 6 baseline runs flagged)
+        - Top-1 family accuracy: **1.000** (label-free path, all 10 fault classes)
+        - MTTR (from summaries start): **2.5 s** mean
+- [x] 4.5 `testbed/demo_replay.py`: deterministic offline demo;
+      pipeline stages + results table + RCA report excerpt;
+      runs in ~11 s without root; 10/10 recall 1.000 / top-1 1.000.
+- [x] 4.6 `testbed/demo_live.sh`: start daemon → inject cpuStressor1 →
+      wait for alert in `data/alerts.jsonl` → print alert + report excerpt
+      → stop daemon; timeout configurable (default 120 s).
+- [x] `testbed/README.md`: evaluator runbook (quick demo 3 steps, full
+      matrix, script reference, run IDs, artefacts, env vars).
+- [x] `DEMO.md`: evaluator click-through with expected output excerpts,
+      key claims table, data inspection commands, troubleshooting.
+
+### 2026-10-18 (later 7) — Phase 5 LLM layer + final documentation complete
+
+- [x] 5.1 LLM review layer in `ragExplainer.py`: supports both online
+      OpenAI-compatible APIs (`RCA_LLM_API_KEY`) and local Ollama / vLLM
+      instances (`RCA_LLM_BASE_URL=http://localhost:11434/v1` or native `/api/chat`),
+      with strictly bounded prompt enforcing reasoning only on cited telemetry.
+- [x] 5.2 Background daemon integration: `rcaDaemon.py` automatically attaches
+      LLM reviews to finalized episode reports when LLM is configured.
+- [x] Mock unit test suite `testbed/test_llm.py`: validates OpenAI completions,
+      local Ollama schema, 404 fallback, and graceful error handling (6/6 tests pass).
+- [x] Documentation refresh:
+      - `README.md`: refreshed with measured metrics (recall 1.000, top-1 accuracy 1.000,
+        FPR 0.000, MTTR 2.5 s), LLM configuration, and cleared backlog items.
+      - `IMPLEMENTATION.md`: updated with local Ollama instructions and testbed commands.
+      - `preprocessing.md`: updated with `BEGIN_NS`/`WINDOW_END_NS` clock markers,
+        persisted OCSVM requirements (≥ 50 Normal rows), per-run edge files,
+        label-free `diagnosis.py` classification, and daemon incremental window rule.
+      - `DEMO.md`: updated with measured evaluation metrics and LLM test guide.
+      - `changes.md`: logged Phases 4 and 5 completions.
+
 

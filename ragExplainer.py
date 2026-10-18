@@ -68,16 +68,18 @@ class KnowledgeCorpus:
         return results
 
 # --------------------------------------------------------------------------
-# Optional online LLM (OpenAI-compatible chat completions API)
+# Optional LLM layer (OpenAI-compatible API or local Ollama / vLLM)
 #
-# Enabled by setting RCA_LLM_API_KEY. Works with OpenAI, Groq, OpenRouter,
-# Together, etc. — any provider exposing /chat/completions:
+# Enabled by setting RCA_LLM_API_KEY (for cloud APIs) or RCA_LLM_BASE_URL
+# (for local/custom endpoints like Ollama at http://localhost:11434/v1):
 #
 #   export RCA_LLM_API_KEY=sk-...
 #   export RCA_LLM_BASE_URL=https://api.groq.com/openai/v1   # optional
 #   export RCA_LLM_MODEL=llama-3.3-70b-versatile             # optional
 #
-# No local installation or model download is needed.
+# Or with a local Ollama instance:
+#   export RCA_LLM_BASE_URL=http://localhost:11434/v1
+#   export RCA_LLM_MODEL=llama3.2
 # --------------------------------------------------------------------------
 
 LLM_BASE_URL_DEFAULT = 'https://api.openai.com/v1'
@@ -92,18 +94,52 @@ LLM_SYSTEM_PROMPT = (
 )
 
 
-def query_online_llm(prompt: str) -> Optional[str]:
-    """Ask an OpenAI-compatible /chat/completions API.
-
-    Returns None when disabled (RCA_LLM_API_KEY unset) or when the call fails
-    for any reason, so callers can fall back to the grounded template report.
-    """
+def is_llm_enabled() -> bool:
+    """Return True if an API key is set or a local LLM endpoint is configured."""
     api_key = os.environ.get('RCA_LLM_API_KEY', '').strip()
-    if not api_key:
+    base_url = os.environ.get('RCA_LLM_BASE_URL', '').strip().lower()
+    if api_key:
+        return True
+    if base_url and any(h in base_url for h in ('localhost', '127.0.0.1', '11434', 'ollama')):
+        return True
+    return False
+
+
+def query_llm(prompt: str) -> Optional[str]:
+    """Ask an OpenAI-compatible /chat/completions API or local Ollama instance.
+
+    Returns None when disabled or when the call fails for any reason, so callers
+    can seamlessly fall back to the grounded template report.
+    """
+    if not is_llm_enabled():
         return None
 
-    base_url = os.environ.get('RCA_LLM_BASE_URL', LLM_BASE_URL_DEFAULT).rstrip('/')
-    model = os.environ.get('RCA_LLM_MODEL', LLM_MODEL_DEFAULT)
+    api_key = os.environ.get('RCA_LLM_API_KEY', '').strip()
+    base_url = os.environ.get('RCA_LLM_BASE_URL', '').strip() or LLM_BASE_URL_DEFAULT
+    base_url = base_url.rstrip('/')
+
+    # For local servers (Ollama, vLLM, local stubs) without an explicit key, use a dummy token
+    if not api_key:
+        api_key = 'local'
+
+    model = os.environ.get('RCA_LLM_MODEL', '').strip()
+    if not model:
+        if '11434' in base_url or 'ollama' in base_url.lower():
+            model = 'llama3.2'
+        else:
+            model = LLM_MODEL_DEFAULT
+
+    # Determine endpoint URL
+    if base_url.endswith('/chat/completions'):
+        url = base_url
+    elif base_url.endswith('/v1'):
+        url = f'{base_url}/chat/completions'
+    elif ':11434' in base_url and not base_url.endswith('/api'):
+        # Ollama root host -> standard OpenAI compatibility path
+        url = f'{base_url}/v1/chat/completions'
+    else:
+        url = f'{base_url}/chat/completions'
+
     payload = json.dumps({
         'model': model,
         'messages': [
@@ -112,21 +148,84 @@ def query_online_llm(prompt: str) -> Optional[str]:
         ],
         'temperature': 0.2,
     }).encode('utf-8')
+
     req = urllib.request.Request(
-        f'{base_url}/chat/completions',
+        url,
         data=payload,
         headers={
             'Content-Type': 'application/json',
             'Authorization': f'Bearer {api_key}',
         },
     )
+
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode('utf-8'))
-        return data['choices'][0]['message']['content'].strip()
-    except Exception as e:
-        print(f"[!] Online LLM call failed ({type(e).__name__}: {e}) — using grounded template only.")
+        # Standard OpenAI schema
+        if 'choices' in data and len(data['choices']) > 0:
+            msg = data['choices'][0].get('message', {})
+            return msg.get('content', '').strip()
+        # Native Ollama /api/chat schema
+        if 'message' in data and 'content' in data['message']:
+            return data['message']['content'].strip()
+        # Native Ollama /api/generate schema
+        if 'response' in data:
+            return data['response'].strip()
         return None
+    except urllib.error.HTTPError as e:
+        # If 404 on local /v1/chat/completions, attempt fallback to native /api/chat
+        if e.code == 404 and (':11434' in base_url or 'ollama' in base_url.lower() or 'localhost' in base_url or '127.0.0.1' in base_url):
+            try:
+                clean_root = base_url.split('/v1')[0]
+                native_url = f"{clean_root}/api/chat"
+                native_payload = json.dumps({
+                    'model': model,
+                    'messages': [
+                        {'role': 'system', 'content': LLM_SYSTEM_PROMPT},
+                        {'role': 'user', 'content': prompt},
+                    ],
+                    'stream': False,
+                }).encode('utf-8')
+                native_req = urllib.request.Request(
+                    native_url,
+                    data=native_payload,
+                    headers={'Content-Type': 'application/json'},
+                )
+                with urllib.request.urlopen(native_req, timeout=30) as resp:
+                    data = json.loads(resp.read().decode('utf-8'))
+                if 'message' in data and 'content' in data['message']:
+                    return data['message']['content'].strip()
+            except Exception as e_inner:
+                print(f"[!] Ollama fallback failed ({type(e_inner).__name__}: {e_inner})")
+        print(f"[!] LLM call failed ({type(e).__name__}: {e}) — using grounded template only.")
+        return None
+    except Exception as e:
+        print(f"[!] LLM call failed ({type(e).__name__}: {e}) — using grounded template only.")
+        return None
+
+
+# Backward-compatible alias
+query_online_llm = query_llm
+
+
+def review_report_with_llm(report_text: str) -> Optional[str]:
+    """Review an evidence-grounded RCA report with strictly bounded LLM reasoning.
+
+    Returns the review text, or None if the LLM layer is disabled or unavailable.
+    """
+    if not is_llm_enabled():
+        return None
+
+    prompt = (
+        "Below is an evidence-grounded RCA draft produced by rule-based analysis "
+        "of kernel telemetry for ONE anomaly window. Review it strictly against "
+        "the evidence it cites.\n\n"
+        f"{report_text}\n"
+        "State the most likely root cause and the single most informative piece "
+        "of evidence for it. If the draft is not supported by the evidence, say "
+        "what is missing instead of guessing."
+    )
+    return query_llm(prompt)
 
 def build_retrieval_query(window: Dict[str, Any]) -> str:
     """Keyword query for TF-IDF retrieval.
@@ -276,17 +375,18 @@ def explain_anomalies(causal_summaries_file: str = CAUSAL_SUMMARIES_FILE, knowle
         return []
 
     corpus = KnowledgeCorpus(knowledge_dir)
-    if os.environ.get('RCA_LLM_API_KEY', '').strip():
-        print(f"[i] Online LLM enabled: {os.environ.get('RCA_LLM_MODEL', LLM_MODEL_DEFAULT)} "
-              f"@ {os.environ.get('RCA_LLM_BASE_URL', LLM_BASE_URL_DEFAULT)}")
+    if is_llm_enabled():
+        base_url = os.environ.get('RCA_LLM_BASE_URL', LLM_BASE_URL_DEFAULT)
+        model = os.environ.get('RCA_LLM_MODEL', LLM_MODEL_DEFAULT)
+        print(f"[i] LLM review enabled: {model} @ {base_url}")
     else:
-        print("[i] Online LLM disabled (set RCA_LLM_API_KEY to enable; template report only).")
+        print("[i] LLM review disabled (set RCA_LLM_API_KEY or RCA_LLM_BASE_URL to enable; template report only).")
     reports = []
     full_text_report = []
 
     print(f"\n=======================================================")
     print(f"       ROOT CAUSE ANALYSIS (RAG EXPLAINER)            ")
-    print(f"=======================================================\n")
+    print(f"=======================================================")
 
     for win in windows:
         # If window had no edges and no candidate roots, but had anomaly flags:
@@ -295,22 +395,10 @@ def explain_anomalies(causal_summaries_file: str = CAUSAL_SUMMARIES_FILE, knowle
 
         report_text = synthesize_grounded_report(win, retrieved_docs)
 
-        # Optional online LLM review (skipped when RCA_LLM_API_KEY is unset)
-        llm_response = None
-        if os.environ.get('RCA_LLM_API_KEY', '').strip():
-            prompt = (
-                "Below is an evidence-grounded RCA draft produced by rule-based analysis "
-                "of kernel telemetry for ONE anomaly window. Review it strictly against "
-                "the evidence it cites.\n\n"
-                f"{report_text}\n"
-                "State the most likely root cause and the single most informative piece "
-                "of evidence for it. If the draft is not supported by the evidence, say "
-                "what is missing instead of guessing."
-            )
-            llm_response = query_online_llm(prompt)
-
+        # Optional LLM review (OpenAI-compatible or local Ollama)
+        llm_response = review_report_with_llm(report_text)
         if llm_response:
-            report_text += f"\nLLM review (online API):\n{llm_response}\n"
+            report_text += f"\nLLM review:\n{llm_response}\n"
 
         print(report_text)
         full_text_report.append(report_text)

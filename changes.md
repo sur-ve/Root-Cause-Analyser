@@ -97,9 +97,24 @@ Tracking doc — the full plan lives in [PLAN.md](PLAN.md).
 * [ ] Live smoke under sudo (user): preflight (validates the new monitor tracker),
       short `--monitor` run, `--learn` + injected fault.
 
-## In progress / next
+## Done (Phase 4 evaluator testbed complete — 2026-10-18)
 
-* **Phase 4** — `testbed/evaluate.py`, `demo_replay.py`, `demo_live.sh`,
-  `testbed/README.md`.
-* `kernel.sched_schedstats=1` keeps `rq_time` / `iowait_time` alive
-  (preflight sets it per boot).
+* [x] **4.4 `testbed/evaluate.py`** — ground truth vs pipeline output table;
+      `data/evaluation_results.csv` + `data/demo_metrics.json`.
+      Fault recall: **1.000** (10/10), Normal FPR: **0.000** (0/6), Top-1 family accuracy: **1.000**, MTTR: **2.5 s** mean.
+* [x] **4.5 `testbed/demo_replay.py`** — deterministic offline demo;
+      pipeline stages + results table + RCA report excerpt; runs in ~6–11 s without root.
+* [x] **4.6 `testbed/demo_live.sh`** — live end-to-end demo (daemon + safe CPU fault injection → alert in ≤ 60 s).
+* [x] **`testbed/README.md`** & **`DEMO.md`** — evaluator runbook and click-through guide.
+
+## Done (Phase 5 LLM layer + final docs complete — 2026-10-18)
+
+* [x] **LLM layer enhancements** — `ragExplainer.py` supports both online OpenAI-compatible
+      APIs (`RCA_LLM_API_KEY`) and local Ollama / vLLM endpoints (`RCA_LLM_BASE_URL=http://localhost:11434/v1`);
+      native `/api/chat` fallback if needed; strictly evidence-grounded prompt.
+* [x] **Daemon integration** — `rcaDaemon.py` includes LLM review in finalized episode reports when configured.
+* [x] **Unit testing** — `testbed/test_llm.py` tests online API schema, local Ollama schema, 404 fallback,
+      and graceful degradation when disabled/unreachable (6/6 tests pass without internet or root).
+* [x] **Documentation refresh** — `README.md`, `IMPLEMENTATION.md`, `preprocessing.md`, and `DEMO.md`
+      fully refreshed with current metrics, architecture, and evaluator runbooks.
+

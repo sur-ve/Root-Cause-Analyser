@@ -34,31 +34,62 @@ Automatically answer: **what process / contention pattern caused a performance o
 
 ---
 
-## Dependencies
+## Feature Matrix & Demonstration Cheat Sheet
+
+Use this cheat sheet to quickly demonstrate any specific subsystem of RCA:
+
+| Subsystem / Feature | Underlying Tech | Key Files | Quick Demo Command |
+|---|---|---|---|
+| **Turnkey Offline Replay** | Full 4-stage pipeline | `testbed/demo_replay.py` | `python3 testbed/demo_replay.py` |
+| **Ground-Truth Evaluation** | Quantitative accuracy & MTTR | `testbed/evaluate.py` | `python3 testbed/evaluate.py` |
+| **Live Daemon & Alerting** | Continuous background monitor | `testbed/demo_live.sh`, `rcaDaemon.py` | `sudo bash testbed/demo_live.sh` |
+| **Detector Benchmark** | OCSVM vs IsolationForest vs LOF | `detectorBenchmark.py` | `python3 detectorBenchmark.py` |
+| **Held-Out Stratified Test** | Stratified split & per-class recall | `overallBenchmark.py` | `python3 overallBenchmark.py` |
+| **Kernel Latency / Lock Probes** | eBPF maps (futex, vfs, oom, rq, io) | `probes.bt`, `probeExtractor.py` | `sudo python3 parentProcess.py lockStressor1` |
+| **Procfs PSI & Vmstat Deltas** | `/proc/pressure/*`, `/proc/vmstat` | `procExtractor.py` | `sudo python3 parentProcess.py memStressor1` |
+| **Wakeup Edge Tracing** | In-kernel sampled sched_wakeup | `wakeupTracker.bt` | `sudo python3 parentProcess.py default` |
+| **Persisted Model (Train/Score)** | StandardScaler + OneClassSVM | `anomalyDetection.py` | `python3 anomalyDetection.py --score` |
+| **Causal Graph & Root Analysis** | NetworkX Digraph (Wakee→Waker) | `analyzeCausalGraphs.py` | `python3 analyzeCausalGraphs.py` |
+| **Label-Free Classification** | Multi-tier evidence engine | `diagnosis.py` | `python3 diagnosis.py data/combined_features.csv` |
+| **Evidence-Grounded RAG** | TF-IDF cosine sim + runbooks | `ragExplainer.py`, `knowledge/` | `python3 ragExplainer.py` |
+| **LLM Review (Cloud API)** | OpenAI-compatible completions | `ragExplainer.py` | `RCA_LLM_API_KEY=sk-... python3 ragExplainer.py` |
+| **LLM Review (Local Ollama)** | Ollama /v1 & /api endpoints | `ragExplainer.py` | `RCA_LLM_BASE_URL=http://localhost:11434/v1 python3 ragExplainer.py` |
+| **LLM Mock Unit Test Suite** | Ephemeral HTTP test server | `testbed/test_llm.py` | `python3 testbed/test_llm.py` |
+| **Safe Cgroup Stressors** | `systemd-run --scope` cgroups | `testbed/run_fault.sh`, `run_all.sh` | `sudo bash testbed/run_fault.sh memStressor2` |
+
+---
+
+## Dependencies & System Requirements
+
+### Host Requirements
+- **OS:** Linux (Ubuntu 22.04/24.04 LTS or Debian 11/12 recommended)
+- **Kernel:** Linux ≥ 5.4 with eBPF tracepoints and PSI (`CONFIG_PSI=y`, check `/proc/pressure/cpu`)
+- **Hardware:** ≥ 2 CPU cores, ≥ 4 GiB RAM (≥ 2 GiB available), ≥ 5 GiB free disk space
+- **Privileges:** Root (`sudo`) is required for live eBPF collection and stressor cgroup scoping; regular user permissions suffice for offline replay, analysis, and evaluation
 
 ### System packages
 
 ```bash
 sudo apt update
 sudo apt install -y bpftrace python3 python3-venv python3-pip \
-  stress-ng fio coreutils
+  stress-ng fio coreutils systemd
 ```
 
-Requirements:
+Enable kernel scheduler statistics (required for runqueue and I/O wait probe tracking):
+```bash
+sudo sysctl -w kernel.sched_schedstats=1
+```
 
-- Linux kernel with eBPF / tracepoints enabled
-- Root (or `CAP_BPF` / `CAP_SYS_ADMIN`) to run bpftrace
-- PSI available under `/proc/pressure/` (kernels ≥ 4.20)
-
-### Python packages
+### Python environment
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
+pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-`requirements.txt` covers the offline pipeline (`scikit-learn`, `networkx`, `pandas`, `numpy`). The optional LLM review layer needs **no extra install** — it calls any OpenAI-compatible API when `RCA_LLM_API_KEY` is set.
+`requirements.txt` covers the offline pipeline (`scikit-learn`, `networkx`, `pandas`, `numpy`). The optional LLM review layer needs **no extra dependencies** — it communicates via Python standard library HTTP requests to any OpenAI-compatible API or local Ollama endpoint.
 
 ---
 
@@ -135,8 +166,15 @@ RCA/
 ├── run_pipeline.py           # One-command offline pipeline runner
 ├── rcaDaemon.py              # Two-phase background monitor (--learn / --monitor)
 ├── deploy/rca-daemon.service # systemd unit for the monitor
-├── autoExtractor.sh          # Shell helper to collect all stressor classes
+├── labels.py                 # Single source of truth: stressor → label/family mapping
 ├── testbed/                  # Evaluator testbed (preflight, fault runs, demo)
+│   ├── preflight.sh          # Environment & safety checks
+│   ├── run_fault.sh          # One guarded fault run + post-run verification
+│   ├── run_all.sh            # Full 10-fault matrix (resumable)
+│   ├── demo_replay.py        # Offline replay demo (no root needed)
+│   ├── demo_live.sh          # Live daemon + fault injection end-to-end demo
+│   ├── evaluate.py           # Ground truth vs pipeline → results CSV + metrics JSON
+│   └── README.md             # Evaluator runbook
 ├── requirements.txt          # Python dependencies
 ├── preprocessing.md          # Preprocessing steps documentation
 ├── IMPLEMENTATION.md         # Step-by-step build guide
@@ -321,8 +359,7 @@ python3 overallBenchmark.py --test-size 0.3 --nu 0.05
 - Classifies cause via `diagnosis.py` (shared with the benchmarks; observed evidence only):
   culprit-process identity → kernel OOM-kill event → metric signatures → `unknown`.
   Ground-truth labels are never used.
-- Collects evidence (OOM, swap, PSI, lock, I/O, graph) and remediation from runbooks.
-- Optional online LLM review via any OpenAI-compatible API: set `RCA_LLM_API_KEY` (plus optional `RCA_LLM_BASE_URL`, `RCA_LLM_MODEL`); no local install, template report is the fallback.
+- Optional LLM review via any OpenAI-compatible cloud API (OpenAI, Groq, OpenRouter) or local Ollama instance: set `RCA_LLM_API_KEY` or `RCA_LLM_BASE_URL=http://localhost:11434/v1` (with optional `RCA_LLM_MODEL`); no local install required for cloud use, template report is the fallback. Unit testable via `python3 testbed/test_llm.py`.
 - Writes `data/rca_report.txt` and `data/rca_report.json`.
 
 #### Knowledge corpus (`knowledge/`)
@@ -433,39 +470,172 @@ These labels train evaluation only; the detector itself is unsupervised (fits on
 
 ---
 
-## Quick Start
+## Testing Environment Instantiation & Demonstration
+
+This section provides the exact steps to instantiate a testing environment and demonstrate how RCA detects, causally analyzes, and explains performance faults.
+
+### Step 1: Instantiate the Environment
+
+RCA can run directly on a Linux host or inside an isolated virtual machine.
+
+#### Option A: Isolated Virtual Machine via Multipass (Recommended for stress testing)
+If you want an isolated sandbox that will not disrupt your workstation during memory or CPU stress testing:
+```bash
+# Launch an Ubuntu 24.04 instance with required resources
+multipass launch 24.04 --name rca-test --cpus 2 --memory 4G --disk 20G
+multipass shell rca-test
+
+# Inside the instance, clone the repository
+git clone https://github.com/sur-ve/RCA.git RCA
+cd RCA
+```
+
+#### Option B: Existing Linux Host
+Ensure your system meets the [Dependencies & System Requirements](#dependencies--system-requirements) (Linux kernel ≥ 5.4, eBPF enabled, `/proc/pressure/cpu` readable).
+
+---
+
+### Step 2: System Provisioning & Setup
+
+Install tracing and fault injection tools, enable scheduler statistics, and set up the Python virtual environment:
 
 ```bash
 cd /path/to/RCA
+
+# 1. Install OS packages and tracing utilities
+sudo apt update
+sudo apt install -y bpftrace python3 python3-venv python3-pip \
+  stress-ng fio coreutils systemd
+
+# 2. Enable kernel scheduler stats (enables runqueue wait and iowait tracepoints)
+sudo sysctl -w kernel.sched_schedstats=1
+
+# 3. Create virtual environment and install Python libraries
 python3 -m venv .venv
 source .venv/bin/activate
+pip install --upgrade pip
 pip install -r requirements.txt
-
-# 1) Collect baseline + fault classes (needs sudo)
-sudo python3 parentProcess.py default
-sudo python3 parentProcess.py cpuStressor1
-# …or all classes:
-sudo bash autoExtractor.sh
-
-# 2) Full offline pipeline
-python3 run_pipeline.py
-# Reports → data/rca_report.txt / data/rca_report.json
-
-# 3) Benchmarks (optional)
-python3 detectorBenchmark.py
-python3 overallBenchmark.py
-```
-
-Individual stages:
-
-```bash
-python3 featureExtractor.py
-python3 anomalyDetection.py
-python3 analyzeCausalGraphs.py
-python3 ragExplainer.py
 ```
 
 ---
+
+### Step 3: Run the Preflight Safety Check
+
+Verify kernel tracepoints, eBPF attach permissions, resource limits, and probe compilation:
+
+```bash
+sudo bash testbed/preflight.sh --clean
+```
+
+**What this verifies:**
+- Kernel tracepoints and eBPF attach permissions (`bpftrace`)
+- `/proc/pressure` (PSI) readability
+- Kernel `sched_schedstats=1` enabled
+- Sufficient disk space (≥ 4 GiB free) and available memory (≥ 2 GiB)
+- Smoke tests all eBPF probe scripts (`probes.bt`, `wakeupTracker.bt`, `wakeupTrackerMonitor.bt`)
+- Automatically kills any stale collection processes or dangling cgroup scopes
+
+---
+
+### Step 4: Demonstrating How RCA Works (Turnkey Workflows)
+
+Three turnkey demonstration modes demonstrate the system end-to-end:
+
+#### Mode 1: Deterministic Offline Replay (No root needed, ~10 seconds)
+Replays the pre-collected 16-run corpus through the entire pipeline:
+```bash
+python3 testbed/demo_replay.py
+```
+**What this demonstrates:**
+1. **Featurization:** Merges bpftrace latency windows with procfs PSI/vmstat samples.
+2. **Detection:** Scores all windows with the persisted OneClassSVM model (`data/model/ocsvm.joblib`).
+3. **Causal Graph Analysis:** Builds directed `Wakee → Waker` dependency graphs and extracts terminal blockers (candidate roots).
+4. **RAG Explanation:** Matches anomaly symptoms against runbooks in `knowledge/*.md` and generates a structured RCA report with remediation recommendations.
+5. **Results Table:** Prints a per-fault verification table showing **10/10 fault classes detected** with **1.000 Top-1 family accuracy**.
+
+#### Mode 2: Live Background Monitoring & Fault Injection (Root required, ~2 minutes)
+Demonstrates real-time anomaly detection, causal analysis, and alert generation in continuous monitor mode:
+```bash
+sudo bash testbed/demo_live.sh
+```
+**What this demonstrates:**
+1. Starts the background monitoring daemon (`rcaDaemon.py`) with continuous low-overhead tracing (1-in-1000 sampled edges).
+2. Automatically injects a safe CPU competition fault (`cpuStressor1`, 45 s).
+3. The daemon detects the fault in real time, bounds the anomaly episode, traces causal blocker graphs, and emits an alert to `data/alerts.jsonl`.
+4. The testbed script captures the alert, measures MTTR (typically within 1 cycle, ≤ 60 s), prints the RCA report excerpt, and terminates the daemon cleanly.
+
+#### Mode 3: Ground-Truth Quantitative Accuracy Evaluation (No root needed, ~3 seconds)
+Evaluates pipeline predictions against labeled ground truth in `data/ground_truth.jsonl`:
+```bash
+python3 testbed/evaluate.py
+```
+**Expected metrics:**
+- **Fault Detection Recall:** 1.000 (10/10 fault runs detected)
+- **Normal False Positive Rate:** 0.000 (0 of 6 baseline runs flagged)
+- **Top-1 Family Accuracy:** 1.000 (label-free diagnosis path)
+- **Mean Time to Resolution (MTTR):** ~2.5 s
+- Generates `data/evaluation_results.csv` and `data/demo_metrics.json`.
+
+---
+
+### Step 5: Testing with the Evidence-Grounded LLM Review Layer (Optional)
+
+The RAG explainer includes an optional LLM layer that reviews rule-based diagnosis drafts against cited kernel metrics:
+
+#### Cloud API (OpenAI, Groq, OpenRouter)
+```bash
+export RCA_LLM_API_KEY=sk-...
+export RCA_LLM_BASE_URL=https://api.groq.com/openai/v1   # optional
+export RCA_LLM_MODEL=llama-3.3-70b-versatile             # optional
+python3 ragExplainer.py
+```
+
+#### Local Ollama (No API key needed)
+```bash
+export RCA_LLM_BASE_URL=http://localhost:11434/v1
+export RCA_LLM_MODEL=llama3.2
+python3 ragExplainer.py
+```
+
+#### Unit Test Mock Suite
+Verify LLM client behavior, Ollama schema handling, and 404 fallbacks without external network calls:
+```bash
+python3 testbed/test_llm.py
+```
+
+---
+
+### Step 6: Collecting a Fresh Fault Matrix (Optional, ~30–40 minutes)
+
+To collect an entirely new corpus from scratch on your host:
+```bash
+# 1. Run all 10 fault classes with cgroup isolation guards (resumable)
+sudo bash testbed/run_all.sh
+
+# 2. Re-extract features, train the model, and evaluate
+python3 featureExtractor.py
+python3 anomalyDetection.py --train
+python3 anomalyDetection.py --score
+python3 analyzeCausalGraphs.py
+python3 ragExplainer.py
+python3 testbed/evaluate.py
+```
+
+---
+
+### Step 7: Running Individual Pipeline Stages
+
+You can also run stages individually or via the one-command batch runner:
+```bash
+python3 run_pipeline.py
+```
+Or stage-by-stage:
+```bash
+python3 featureExtractor.py       # merges probe + procfs data -> combined_features.csv
+python3 anomalyDetection.py --score # scores features -> scored_features.csv
+python3 analyzeCausalGraphs.py    # builds causal graphs -> causal_summaries.json
+python3 ragExplainer.py           # synthesizes reports -> data/rca_report.txt
+```
 
 ## Implementation Walkthrough
 
@@ -509,23 +679,137 @@ Re-run `detectorBenchmark.py` / `overallBenchmark.py` after changing features or
 
 ---
 
-## Observed Detection Metrics (current corpus)
+## Benchmark Suite & Quantitative Evaluation
 
-From `detectorBenchmark.py` / production-style full-data scoring (re-run after data changes):
+The system includes multiple reproducible benchmarks to validate detector quality, held-out generalization, and end-to-end diagnostic accuracy against labeled ground truth.
 
-| Detector | Accuracy | F1 | FPR | Role |
+### 1. Detector Comparison Benchmark (`detectorBenchmark.py`)
+
+Compares **OneClassSVM**, **IsolationForest**, and **LocalOutlierFactor** on the full 71,777-row corpus (35 numeric features, trained on 3,000 Normal samples):
+
+```bash
+python3 detectorBenchmark.py
+```
+
+**Measured results (71,777 rows, 35 features):**
+
+| Detector | Accuracy | Precision | Recall | F1 Score | Normal FPR | Fit Time | Score Time | Role |
+|---|---|---|---|---|---|---|---|---|
+| **OneClassSVM** | **0.9780** | **0.9649** | **0.9996** | **0.9820** | **5.43 %** | **0.036 s** | **0.700 s** | **Production** |
+| LocalOutlierFactor | 0.8950 | 0.8510 | 0.9996 | 0.9193 | 26.13 % | 0.110 s | 0.941 s | Comparison |
+| IsolationForest | 0.8513 | 0.9317 | 0.8112 | 0.8673 | 8.88 % | 0.295 s | 0.227 s | Prior baseline |
+
+**Confusion Matrix breakdown:**
+- **OneClassSVM:** TP: 42,971 | FP: 1,562 | FN: 17 | TN: 27,227
+- **IsolationForest:** TP: 34,870 | FP: 2,557 | FN: 8,118 | TN: 26,232
+- **LocalOutlierFactor:** TP: 42,972 | FP: 7,524 | FN: 16 | TN: 21,265
+
+*Result artifact written to:* `data/detector_benchmark.json`
+
+---
+
+### 2. Held-Out Stratified Benchmark (`overallBenchmark.py`)
+
+Performs a **30% stratified train/test split** (50,243 train rows / 21,534 test rows) on the production OneClassSVM pipeline and evaluates both row-level detection and window-level cause-family classification:
+
+```bash
+python3 overallBenchmark.py
+# Or customize split and nu:
+python3 overallBenchmark.py --test-size 0.3 --nu 0.05
+```
+
+**Held-out TEST performance (21,534 unseen rows):**
+- **Accuracy:** 0.9773
+- **Precision:** 0.9635
+- **Recall:** 0.9999 (only 1 false negative out of 12,897 fault rows)
+- **F1 Score:** 0.9814
+- **Normal FPR:** 0.0565 (488 false positives out of 8,637 Normal rows)
+- **Fit + Score Time:** 0.755 s
+
+**Per-class detection recall on the held-out test split:**
+
+| Class Name | Test Samples ($n$) | Detection Recall |
+|---|---|---|
+| `Baseline CPU Usage` | 1,440 | 1.000 |
+| `CPU Competition` | 1,294 | 1.000 |
+| `Process Throttled` | 1,407 | 1.000 |
+| `Continuous Heap Expansion` | 638 | 1.000 |
+| `Memory Swapping` | 1,412 | 1.000 |
+| `OOM Kill` | 818 | 1.000 |
+| `Userspace Contention` | 1,491 | 0.999 |
+| `Kernel-Internal Contention` | 1,567 | 1.000 |
+| `Small Random Writes` | 1,411 | 1.000 |
+| `Large Sequential Writes` | 1,419 | 1.000 |
+| `Normal` (baseline) | 8,637 | FPR = 0.057 |
+
+**Window-level cause-family classification agreement (label-free via `diagnosis.py`):**
+- **Fault-active windows:** **99.42 %** agreement (171 evaluated windows overlapping fault activity)
+  - `CPU / Scheduling` ($n=57$): recall = 1.000
+  - `I/O Saturation` ($n=38$): recall = 1.000
+  - `Lock Contention` ($n=38$): recall = 1.000
+  - `Memory Pressure` ($n=19$): recall = 1.000
+  - `OOM` ($n=12$): recall = 1.000
+  - `Heap Expansion` ($n=7$): recall = 0.857
+- **All fault windows (including transition edges):** **88.67 %** agreement (203 total windows)
+
+*Result artifact written to:* `data/overall_benchmark.json`
+
+---
+
+### 3. Ground-Truth Accuracy & Latency Evaluation (`testbed/evaluate.py`)
+
+Evaluates the end-to-end pipeline across all 16 recorded runs (6 baselines + 10 faults) against `data/ground_truth.jsonl`:
+
+```bash
+python3 testbed/evaluate.py
+```
+
+**Run-level evaluation table:**
+
+| Run ID | Ground-Truth Fault Label | Detected? | Family Match | Alert Latency (MTTR) |
 |---|---|---|---|---|
-| **OneClassSVM** | 0.978 | 0.982 | 5.4 % | **Production** |
-| LocalOutlierFactor | 0.895 | 0.919 | 26.1 % | Comparison |
-| IsolationForest | 0.851 | 0.867 | 8.9 % | Prior baseline |
+| `cpuStressor1` | CPU Competition | **YES** | ok (cpu) | 2.4 s |
+| `cpuStressor2` | Process Throttled | **YES** | ok (cpu) | 2.5 s |
+| `cpuStressor3` | Baseline CPU Usage | **YES** | ok (cpu) | 2.5 s |
+| `memStressor1` | Memory Swapping | **YES** | ok (memory) | 2.6 s |
+| `memStressor2` | OOM Kill | **YES** | ok (oom) | 2.4 s |
+| `memStressor3` | Continuous Heap Expansion | **YES** | ok (heap) | 2.6 s |
+| `lockStressor1` | Userspace Contention | **YES** | ok (lock) | 3.2 s |
+| `lockStressor2` | Kernel-Internal Contention | **YES** | ok (lock) | 2.7 s |
+| `ioStressor1` | Small Random Writes | **YES** | ok (io) | 2.3 s |
+| `ioStressor2` | Large Sequential Writes | **YES** | ok (io) | 2.3 s |
+| `default` / `default1`–`default5` | Normal (6 baseline runs) | **no** (0/6 flagged) | N/A | — |
 
-Held-out (`overallBenchmark.py`, 30 % test): OCSVM F1 0.981, FPR 5.7 %,
-per-class recall 1.0 for 9/10 fault classes and 0.999 for the 10th
-(test FPs 488, FNs 1). Label-free cause-family agreement: **99.4 %** over
-fault-active windows (171/203; the rest are transition windows without fault
-activity). All 11 merged fault episodes classify to the correct family.
+**Summary Metrics:**
+- **Fault Detection Recall:** **1.000** (10/10 fault runs detected)
+- **Normal False Positive Rate:** **0.000** (0 of 6 baseline runs flagged)
+- **Top-1 Family Accuracy:** **1.000** (all 10 fault classes correctly classified on the label-free path)
+- **Mean Time to Resolution (MTTR):** **2.5 s**
 
-Hold-out numbers (and TP/TN/FP/FN) are written to `data/overall_benchmark.json` when you run `overallBenchmark.py`.
+*Artifacts written to:* `data/evaluation_results.csv` and `data/demo_metrics.json`
+
+---
+
+### 4. Standalone Cause-Family Classifier Test (`diagnosis.py`)
+
+Test the deterministic label-free diagnosis engine directly on any feature CSV:
+
+```bash
+python3 diagnosis.py data/combined_features.csv
+```
+
+Outputs window counts and recall percentages across CPU, Memory, OOM, Heap, Lock, and I/O families.
+
+---
+
+### 5. LLM Layer Mock Unit Test (`testbed/test_llm.py`)
+
+Test the OpenAI-compatible completions, local Ollama integration, schema fallback, and network error handling without needing an active internet connection or paid API key:
+
+```bash
+python3 testbed/test_llm.py
+```
+*Result:* 6/6 tests pass in 0.5 s using a local mock HTTP server.
 
 ---
 
@@ -543,9 +827,8 @@ Hold-out numbers (and TP/TN/FP/FN) are written to `data/overall_benchmark.json` 
 
 ## Known Follow-ups
 
-See `changes.md`:
+See `changes.md` and `PLAN.md`:
 
-- Phase 3 daemon rewrite (`--learn`/`--monitor`, incremental scoring, alerts) and Phase 4 `evaluate.py` / demo scripts
 - Stronger filtering of noisy kernel wakeups (IRQ threads, kworkers)
 - Optional upgrade from TF-IDF to dense embeddings (would need an embedding model or API)
-- Tune OneClassSVM `nu` if Normal FPR drifts after new data collection
+- Tune OneClassSVM `nu` if Normal FPR drifts after new data collection on heavily loaded machines
