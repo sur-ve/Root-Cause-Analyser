@@ -213,3 +213,39 @@ Expected artefacts for the evaluator:
    template report is already defensible.
 3. **Raw edges for the short demo?** Recommended: aggregated by default, `--raw-edges` only for
    the ≤60 s demo runs to show thread-level paths.
+
+---
+
+## Progress log
+
+### 2026-10-18 — Phase 0 + 1 implemented (awaiting sudo smoke test)
+
+- [x] 0.1 `data/edges.jsonl` (3.18 GB) removed — disk back to ~5.8 GB free
+- [x] 0.2 git repo initialised; artefacts (`data/`, `__pycache__/`, `.venv/`) ignored
+- [x] 0.3 fio stressors bounded (512M / 1G, `--unlink=1`, `--filename=data/scratch_*`)
+- [x] 0.4 `kernel.sched_schedstats` handled by `testbed/preflight.sh`
+- [x] 0.5 `changes.md` refreshed (data.txt left as a historical review)
+- [x] 1.1/1.2 `wakeupAggregator.bt` + `wakeupExtractor.py`; per-run `edgeData` files wired
+      into `parentProcess.py` and `rcaDaemon.py`
+- [x] 1.3 stressor start/end + label/family in meta and `data/ground_truth.jsonl`
+- [x] 1.4 `probeExtractor.py` window stamps from the bpftrace clock
+- [x] 1.5 futex wait-op filter in `probes.bt`
+- [x] 1.6 `procExtractor.py` robustness (missing zones, counter resets)
+- [x] Analyzer: per-run windows, aggregated edge loading, weighted graphs, legacy fallback
+- [ ] 1.7 per-second rate features (deferred to Phase 2 with the detector retrain)
+
+Unit-tested without root: `WindowAccumulator` (aggregation + boundary chaining),
+`ProbeStreamParser` (markers + legacy fallback), analyzer aggregated path and legacy path
+(synthetic `edgeData_*` / `edges.jsonl`).
+
+Pending sudo smoke test (bpftrace cannot run as a normal user):
+
+```bash
+sudo bash testbed/preflight.sh --clean
+sudo python3 parentProcess.py default
+ls -la data/edgeData_default.jsonl data/ground_truth.jsonl
+```
+
+Next: Phase 2 — collect `default` baselines, persist the OneClassSVM
+(`--train` / `--score`), fix label hygiene, re-run benchmarks.
+

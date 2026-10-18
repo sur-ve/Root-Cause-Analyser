@@ -52,7 +52,7 @@ class WindowAccumulator:
         self.begin_ns = None
         self.end_ns = None
         self.prev_end_ns = None
-        self.edges = []
+        self.edges = {}  # (wakee, waker) -> count
         self.windows_written = 0
 
     def _ns_to_epoch(self, ns: int) -> float:
@@ -81,7 +81,8 @@ class WindowAccumulator:
             return self._flush()
         if 'wakee' in rec and 'waker' in rec:
             try:
-                self.edges.append([str(rec['wakee']), str(rec['waker']), int(rec.get('count', 1))])
+                key = (str(rec['wakee']), str(rec['waker']))
+                self.edges[key] = self.edges.get(key, 0) + int(rec.get('count', 1))
             except (TypeError, ValueError):
                 pass
         return False
@@ -93,7 +94,7 @@ class WindowAccumulator:
             self.write_fn({
                 'window_start': self._ns_to_epoch(start_ns),
                 'window_end': self._ns_to_epoch(self.end_ns),
-                'edges': self.edges,
+                'edges': [[wakee, waker, count] for (wakee, waker), count in self.edges.items()],
             })
             wrote = True
             self.windows_written += 1
@@ -101,7 +102,7 @@ class WindowAccumulator:
         if self.end_ns is not None:
             self.prev_end_ns = self.end_ns
         self.end_ns = None
-        self.edges = []
+        self.edges = {}
         return wrote
 
 
