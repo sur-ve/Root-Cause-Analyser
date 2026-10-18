@@ -36,6 +36,58 @@ def load_jsonl(path: str):
                     continue
     return records
 
+def records_to_rows(run_id: str, bpftrace_records, psi_vmstat_records):
+    """Window rows for arbitrary records (shared by the batch merge and rcaDaemon).
+
+    Builds one row per (window, comm) and merges PSI/vmstat columns from the
+    nearest procfs sample (same 2 s tolerance as the batch pipeline). The daemon
+    feeds this incrementally, so it accepts parsed records instead of paths;
+    `merge_pair` below is the batch wrapper that reads a run's files.
+    """
+    if not bpftrace_records or not psi_vmstat_records:
+        return None
+
+    flat_rows = []
+    for rec in bpftrace_records:
+        system_fields = {k: v for k, v in rec.items() if k not in ('window_start', 'window_end', 'processes')}
+        for comm, metrics in rec.get('processes', {}).items():
+            row = {
+                'window_start': rec.get('window_start'),
+                'window_end': rec.get('window_end'),
+                'comm': comm,
+                'run_id': run_id
+            }
+            if isinstance(metrics, dict):
+                row.update(metrics)
+            row.update(system_fields)
+            flat_rows.append(row)
+
+    if not flat_rows:
+        return None
+
+    bpftrace_df = pd.DataFrame(flat_rows)
+    psi_vmstat_df = pd.json_normalize(psi_vmstat_records, sep='_')
+
+    if 'window_start' not in bpftrace_df.columns or 'timestamp' not in psi_vmstat_df.columns:
+        return None
+
+    bpftrace_df = bpftrace_df.sort_values('window_start')
+    psi_vmstat_df = psi_vmstat_df.sort_values('timestamp')
+
+    # Combining data frames by timestamp nearest tolerance = 2.0s
+    combined_df = pd.merge_asof(
+        bpftrace_df,
+        psi_vmstat_df,
+        left_on='window_start',
+        right_on='timestamp',
+        direction='nearest',
+        tolerance=2.0
+    )
+
+    combined_df['run_id'] = run_id
+    return combined_df
+
+
 def merge_pair(run_id: str):
     probeFile = f'data/probeData_{run_id}.jsonl'
     procfsFile = f'data/procfsData_{run_id}.jsonl'
@@ -57,46 +109,11 @@ def merge_pair(run_id: str):
         print(f"[-] Skipping {run_id}: procfs file '{procfsFile}' has no records.")
         return None
 
-    flat_rows = []
-    for rec in bpftrace_records:
-        system_fields = {k: v for k, v in rec.items() if k not in ('window_start', 'window_end', 'processes')}
-        for comm, metrics in rec.get('processes', {}).items():
-            row = {
-                'window_start': rec.get('window_start'),
-                'window_end': rec.get('window_end'),
-                'comm': comm,
-                'run_id': run_id
-            }
-            if isinstance(metrics, dict):
-                row.update(metrics)
-            row.update(system_fields)
-            flat_rows.append(row)
-
-    if not flat_rows:
-        print(f"[-] Skipping {run_id}: no process records found in probe data.")
+    combined_df = records_to_rows(run_id, bpftrace_records, psi_vmstat_records)
+    if combined_df is None or combined_df.empty:
+        print(f"[-] Skipping {run_id}: no usable process records (probe/procfs window mismatch).")
         return None
 
-    bpftrace_df = pd.DataFrame(flat_rows)
-    psi_vmstat_df = pd.json_normalize(psi_vmstat_records, sep='_')
-
-    if 'window_start' not in bpftrace_df.columns or 'timestamp' not in psi_vmstat_df.columns:
-        print(f"[-] Skipping {run_id}: missing timestamp columns for merge.")
-        return None
-
-    bpftrace_df = bpftrace_df.sort_values('window_start')
-    psi_vmstat_df = psi_vmstat_df.sort_values('timestamp')
-
-    # Combining data frame by timestamp nearest tolerance = 2.0s
-    combined_df = pd.merge_asof(
-        bpftrace_df,
-        psi_vmstat_df,
-        left_on='window_start',
-        right_on='timestamp',
-        direction='nearest',
-        tolerance=2.0
-    )
-
-    combined_df['run_id'] = run_id
     combined_df['root_cause'] = label_for_run_id(run_id)
     print(f"[+] Processed {run_id}: {len(combined_df)} records labeled as '{combined_df['root_cause'].iloc[0]}'")
     return combined_df

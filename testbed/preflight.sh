@@ -150,6 +150,13 @@ else
     bad "missing script: wakeupTracker.bt"
 fi
 
+# Daemon edge tracker: same schema, 1-in-1000 sampling (bounded disk growth)
+if [ -f wakeupTrackerMonitor.bt ]; then
+    check_script wakeupTrackerMonitor.bt
+else
+    bad "missing script: wakeupTrackerMonitor.bt (used by rcaDaemon.py)"
+fi
+
 echo
 if [ "$fail" -eq 0 ]; then
     echo "== preflight OK =="

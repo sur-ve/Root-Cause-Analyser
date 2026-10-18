@@ -359,6 +359,43 @@ Next: Phase 2 — collect `default` baselines, persist the OneClassSVM
       88.7 % over all fault windows; **all 11 merged fault episodes classify
       correctly** (previously 10/11 — the OOM miss is fixed).
 
-Next: Phase 3 daemon rewrite; Phase 4 `evaluate.py` / demo scripts; final
-full-matrix validation run as the demo corpus.
+### 2026-10-18 (later 5) — Phase 3 daemon rewrite (offline-verified)
+
+- [x] 3.1 Stage invocation: the daemon now calls the stages **in-process**
+      (`featureExtractor.records_to_rows`, `anomalyDetection` scoring internals,
+      `analyzeCausalGraphs.analyze_anomaly_graph`, `ragExplainer` report
+      synthesis) with explicit paths — `run_id` is never used as a path. A
+      `--no-collect` smoke run logs one line per stage (featurize / score /
+      graph / explain) on each processed run.
+- [x] 3.2 `--learn N` / `--monitor`: learn appends host-normal rows to
+      `data/daemon_baseline.csv` and trains `data/model/ocsvm_daemon.joblib`;
+      monitor loads a persisted model only (daemon model, else batch model).
+- [x] 3.3 Incremental: per-run byte offsets; only new probe/procfs windows are
+      featurized + scored; graphs/reports only for finalized episodes.
+- [x] Window-level anomaly rule (new): flag a window when >= 50 % of its rows
+      are flagged. Measured on the corpus: baseline windows peak at 0.44
+      flagged rows/window, fault windows are >= 0.94 — the offline "any row"
+      rule would alert on every idle window (~3 % row FPR).
+- [x] 3.4 `data/alerts.jsonl`: one line per anomalous window (timestamp,
+      human time, window, cause, culprit, root, remediation, basis); readable
+      reports appended to `data/rca_report.txt` with human timestamps (also in
+      the batch explainer now) + `rca_report.json` history + optional `--notify`.
+- [x] 3.5 Housekeeping: collector restart with fast-failure abort, heartbeat
+      `data/daemon_status.json`, retention of daemon-created run files
+      (`--retain-hours`, batch corpus untouched), rotating `data/daemon.log`.
+- [x] 3.6 `deploy/rca-daemon.service` (CAP_BPF/CAP_PERFMON bounding set,
+      SIGTERM graceful stop).
+- [x] 3.7 Graceful shutdown persists last-scored offsets; restart skips
+      processed windows (smoke-verified).
+- [x] Disk budget: daemon uses new `wakeupTrackerMonitor.bt` (same schema,
+      1-in-1000 sampling: ~7 MB/h edges vs 72 MB/h; total ~29 MB/h < 50 MB/h).
+- [x] Offline smoke tests: memStressor2 → OOM episode (15 alerts),
+      lockStressor1 → lock, ioStressor1 → io, default1/default5 → 0 alerts,
+      retention unit test, offset persistence.
+- [ ] Live smoke under sudo (user): preflight (now validates the monitor
+      tracker) + short `--monitor --interval 20 --max-cycles 3` + `--learn` and
+      an injected fault for the demo.
+
+Next: Phase 4 `evaluate.py` / `demo_replay.py` / `demo_live.sh` /
+`testbed/README.md`; live daemon smoke; final full-matrix validation.
 

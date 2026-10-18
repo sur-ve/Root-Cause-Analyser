@@ -59,12 +59,46 @@ Tracking doc — the full plan lives in [PLAN.md](PLAN.md).
       collector leftovers).
 * [x] `testbed/run_all.sh` — least→most destructive order, resume support.
 
+## Done (Phase 3 daemon rewrite — offline-verified 2026-10-18)
+
+* [x] **3.1 Stage invocation** — all stages run as in-process function calls with
+      explicit data paths (`run_id` is never passed where a stage expects a file
+      path); the `--no-collect` smoke test logs one line per stage
+      (featurize / score / graph / explain).
+* [x] **3.2 Two-phase `--learn` / `--monitor`** — `--learn N` collects host-normal
+      traffic into `data/daemon_baseline.csv` and trains
+      `data/model/ocsvm_daemon.joblib`; `--monitor` never refits (falls back to
+      the batch model when no daemon model exists).
+* [x] **3.3 Incremental scoring** — per-run byte offsets: only newly appended
+      probe/procfs windows are featurized and scored; graphs + reports are built
+      only for flagged episodes.
+* [x] **Window-level anomaly rule** — a window is anomalous iff ≥ 50 % of its
+      ~290 rows is flagged (`--flag-fraction`). The offline "any row" rule would
+      alert on every idle window at ~3 % row-level FPR (baselines peak at 0.44
+      flagged rows/window, fault windows are ≥ 0.94 — clean separation).
+* [x] **3.4 Alerting** — one JSON line per anomalous window in `data/alerts.jsonl`
+      (timestamp, human time, window, cause, culprit, root, remediation, basis);
+      readable report appended to `data/rca_report.txt` (human timestamps) +
+      `data/rca_report.json` history; optional `--notify` desktop notification.
+* [x] **3.5 Housekeeping** — dead collectors restart as a new run (3 fast failures
+      abort), heartbeat `data/daemon_status.json`, retention prunes daemon run
+      files older than `--retain-hours` (batch corpus never touched), rotating
+      `data/daemon.log`.
+* [x] **3.6 systemd unit** — `deploy/rca-daemon.service` (CAP_BPF/CAP_PERFMON
+      bounding set, SIGTERM graceful stop, restart-on-failure).
+* [x] **3.7 Graceful shutdown** — stop collectors → finalize active run → persist
+      last-scored offsets (`data/daemon_state.json`); re-running skips processed
+      windows (verified).
+* [x] **Disk-bounded edge tracking** — daemon uses `wakeupTrackerMonitor.bt`
+      (same schema, 1-in-1000 sampling ≈ 7 MB/h vs 72 MB/h).
+* [x] **Offline smoke tests green** — memStressor2 → 1 OOM episode / 15 alerts;
+      lockStressor1 → lock episode; ioStressor1 → io episode; default1/default5 →
+      0 alerts; retention unit test prunes only old daemon runs.
+* [ ] Live smoke under sudo (user): preflight (validates the new monitor tracker),
+      short `--monitor` run, `--learn` + injected fault.
+
 ## In progress / next
 
-* **Phase 3 daemon rewrite** — `rcaDaemon.py` still passes `run_id` where
-  stages expect file paths, so background analysis never runs; two-phase
-  `--learn`/`--monitor`, incremental scoring, `data/alerts.jsonl`, retention,
-  systemd unit.
 * **Phase 4** — `testbed/evaluate.py`, `demo_replay.py`, `demo_live.sh`,
   `testbed/README.md`.
 * `kernel.sched_schedstats=1` keeps `rq_time` / `iowait_time` alive

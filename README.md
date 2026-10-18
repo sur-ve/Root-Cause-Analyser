@@ -124,6 +124,7 @@ RCA/
 ├── probeExtractor.py         # Parses probes.bt JSON output
 ├── probes.bt                 # Latency / lock / IO / OOM bpftrace maps
 ├── wakeupTracker.bt          # sched_wakeup → edges_<run_id>.jsonl (1-in-100 sampled)
+├── wakeupTrackerMonitor.bt   # Daemon variant: same schema, 1-in-1000 (bounded disk)
 ├── featureExtractor.py       # Merge + label features (auto-discovers runs)
 ├── diagnosis.py              # Shared label-free cause classification (explainer + benchmarks)
 ├── anomalyDetection.py       # Production OneClassSVM scorer
@@ -132,7 +133,8 @@ RCA/
 ├── analyzeCausalGraphs.py    # NetworkX causal analysis + JSON export
 ├── ragExplainer.py           # TF-IDF RAG explainer + structured reports
 ├── run_pipeline.py           # One-command offline pipeline runner
-├── rcaDaemon.py              # Continuous background monitoring daemon
+├── rcaDaemon.py              # Two-phase background monitor (--learn / --monitor)
+├── deploy/rca-daemon.service # systemd unit for the monitor
 ├── autoExtractor.sh          # Shell helper to collect all stressor classes
 ├── testbed/                  # Evaluator testbed (preflight, fault runs, demo)
 ├── requirements.txt          # Python dependencies
@@ -160,7 +162,12 @@ RCA/
     ├── rca_report.txt / .json
     ├── detector_benchmark.json
     ├── overall_benchmark.json
-    └── ground_truth.jsonl     # Per-run labels + stressor start/end (evaluation only)
+    ├── ground_truth.jsonl     # Per-run labels + stressor start/end (evaluation only)
+    ├── daemon_state.json      # Monitor: last-scored offsets (graceful restart)
+    ├── daemon_status.json     # Monitor: heartbeat (pid, cycle, counters, disk)
+    ├── alerts.jsonl           # Monitor: one alert per anomalous window
+    ├── daemon_baseline.csv    # Monitor --learn: host-normal training rows
+    └── daemon.log             # Monitor: rotating log
 ```
 
 ---
@@ -347,14 +354,36 @@ Continues past stage failures so later stages can still use prior outputs.
 
 #### `rcaDaemon.py`
 
-Continuous monitor:
+Two-phase background monitor (see `deploy/rca-daemon.service` for the systemd unit):
 
 ```bash
-python3 rcaDaemon.py --no-collect --interval 300   # analyse existing data
-sudo python3 rcaDaemon.py --interval 300           # collect + analyse
+# Phase A — learn this host's normal behavior, then train the daemon model:
+sudo .venv/bin/python rcaDaemon.py --learn 300
+
+# Phase B — continuous monitoring + alerts:
+sudo .venv/bin/python rcaDaemon.py --monitor --interval 30 --rotate 900 --retain-hours 24
+
+# Offline smoke test of every stage on existing runs (no root):
+.venv/bin/python rcaDaemon.py --no-collect --runs memStressor2,default1 --reprocess
 ```
 
-Starts collectors (unless `--no-collect`), periodically runs the four analysis stages, keeps edges in per-run files (`data/edges_<run_id>.jsonl`), restarts dead collectors.
+Monitor behavior:
+
+- collectors run continuously; run files rotate every `--rotate` seconds (default 900)
+- each cycle only the **new** windows are featurized and scored with the persisted model
+  (`data/model/ocsvm_daemon.joblib`, falling back to the batch model); stages run as
+  in-process calls — `run_id` is never passed where a stage expects a path
+- a window counts as anomalous when ≥ `--flag-fraction` (default 50 %) of its rows are
+  flagged; consecutive anomalous windows merge into episodes, and per episode the causal
+  graph + grounded report are built
+- alerts: one JSON line per anomalous window in `data/alerts.jsonl`
+  (`timestamp, window, cause, culprit, root, remediation`), readable report appended to
+  `data/rca_report.txt`, optional desktop notification (`--notify`)
+- housekeeping: dead collectors restart (3 fast failures abort the daemon), run files older
+  than `--retain-hours` are pruned (daemon-created runs only — never the batch corpus), and
+  `data/daemon_status.json` is the heartbeat
+- graceful shutdown finalizes the active run and persists last-scored offsets in
+  `data/daemon_state.json`; a restart continues where it stopped (no reprocessing)
 
 #### `preprocessing.md`
 

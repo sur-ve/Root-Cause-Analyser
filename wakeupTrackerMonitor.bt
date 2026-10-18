@@ -1,0 +1,40 @@
+#!/usr/bin/env bpftrace
+/*
+ * wakeupTrackerMonitor.bt
+ *
+ * Production-monitor variant of wakeupTracker.bt. Same record schema, same
+ * Wakee -> Waker direction (read back by analyzeCausalGraphs.py — keep the
+ * JSON fields in sync with wakeupTracker.bt), but samples 1 in 1000 wakeup
+ * events instead of 1 in 100.
+ *
+ * Why: the daemon runs for hours/days. At 1-in-100 an idle desktop emits
+ * ~1.2 MB/min of edge lines (~72 MB/h) — over the daemon's disk budget of
+ * ~50 MB/h. At 1-in-1000 that becomes ~7 MB/h. Graphs are only built for
+ * flagged (anomalous) windows, and fault traffic emits orders of magnitude
+ * more wakeups than idle, so fault-time graphs stay dense where it matters.
+ *
+ *   {
+ *     "timestamp": <nsecs since boot>,
+ *     "waker_tid": <tid of current (waking) task>,
+ *     "waker_pid": <pid of current (waking) task>,
+ *     "waker_comm": "<comm of waker>",
+ *     "wakee_tid":  <tid of task being woken>,
+ *     "wakee_comm": "<comm of wakee>"
+ *   }
+ *
+ * Run (usually via rcaDaemon.py):
+ *   sudo stdbuf -oL bpftrace -q wakeupTrackerMonitor.bt > data/edges_<run_id>.jsonl
+ */
+
+tracepoint:sched:sched_wakeup,
+tracepoint:sched:sched_wakeup_new
+/rand % 1000 == 0/
+{
+	printf("{\"timestamp\": %llu, \"waker_tid\": %d, \"waker_pid\": %d, \"waker_comm\": \"%s\", \"wakee_tid\": %d, \"wakee_comm\": \"%s\"}\n",
+		nsecs,
+		tid,
+		pid,
+		comm,
+		args.pid,
+		args.comm);
+}

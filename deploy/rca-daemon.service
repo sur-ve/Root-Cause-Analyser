@@ -1,0 +1,40 @@
+# rca-daemon.service — continuous background RCA monitor (PLAN.md phase 3.6)
+#
+# Install (adjust the paths to your clone first):
+#   sudo cp deploy/rca-daemon.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now rca-daemon
+#   systemctl status rca-daemon          # live log: journalctl -fu rca-daemon
+#
+# Prerequisite — a model must exist, either:
+#   sudo .venv/bin/python rcaDaemon.py --learn 300     # learn this host's normal
+# or the batch model data/model/ocsvm.joblib (used automatically as fallback).
+#
+# Management:
+#   sudo systemctl stop rca-daemon       # SIGTERM -> graceful shutdown: collectors
+#                                        # stopped, active run finalized, offsets saved
+#   sudo systemctl restart rca-daemon    # continues where it stopped (no reprocessing)
+
+[Unit]
+Description=RCA background monitor (bpftrace collectors + OneClassSVM + causal reports)
+Documentation=file:/home/surya/programming/projects/RCA/README.md
+After=local-fs.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/surya/programming/projects/RCA
+ExecStart=/home/surya/programming/projects/RCA/.venv/bin/python /home/surya/programming/projects/RCA/rcaDaemon.py --monitor --interval 30 --rotate 900 --retain-hours 24
+
+# bpftrace needs CAP_BPF + CAP_PERFMON (CAP_SYS_ADMIN on older kernels);
+# the bounding set restricts everything else.
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_SYS_ADMIN CAP_SYS_RESOURCE CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_KILL CAP_NET_ADMIN
+
+# Graceful shutdown on stop/restart (finalize run + persist state)
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

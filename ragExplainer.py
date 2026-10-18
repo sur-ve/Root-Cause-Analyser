@@ -2,6 +2,7 @@ import os
 import sys
 import glob
 import json
+import datetime
 import urllib.request
 import numpy as np
 import pandas as pd
@@ -165,6 +166,14 @@ QUERY_TOKENS = {
     'unknown': ['anomaly', 'contention'],
 }
 
+def _fmt_ts(ts) -> str:
+    """Local human-readable timestamp (epoch seconds -> 'YYYY-mm-dd HH:MM:SS')."""
+    try:
+        return datetime.datetime.fromtimestamp(float(ts)).strftime('%Y-%m-%d %H:%M:%S')
+    except (TypeError, ValueError, OSError):
+        return str(ts)
+
+
 def synthesize_grounded_report(window: Dict[str, Any], retrieved_docs: List[Dict[str, Any]]) -> str:
     win_id = window.get('window_id', 'unknown')
     roots = window.get('candidate_roots', [])
@@ -240,7 +249,7 @@ def synthesize_grounded_report(window: Dict[str, Any], retrieved_docs: List[Dict
     report = []
     report.append(f"=== RCA Report: {win_id} ===")
     report.append(
-        f"Time Range: {window.get('start', 0):.2f} -> {window.get('end', 0):.2f}"
+        f"Time Range: {_fmt_ts(window.get('start', 0))} -> {_fmt_ts(window.get('end', 0))}"
         f"  (Duration: {window.get('duration_sec', 0)}s)"
     )
     report.append(f"Likely root cause: {classified_cause}")
