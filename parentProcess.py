@@ -5,10 +5,9 @@
     -> sudo python3 parentProcess.py
 
     Edge collection:
-      default            → wakeupExtractor.py (aggregated per-3s windows,
-                           data/edgeData_<run_id>.jsonl; low disk footprint)
-      RCA_RAW_EDGES=1    → raw wakeupTracker.bt lines
-                           (data/edges_<run_id>.jsonl; short experiments only)
+      wakeupTracker.bt with 1-in-100 in-kernel sampling →
+      data/edges_<run_id>.jsonl (a few MB per run; read back by
+      analyzeCausalGraphs.py together with data/meta_<run_id>.json)
 """
 
 import json
@@ -106,18 +105,13 @@ def __main__():
     proc1 = subprocess.Popen([sys.executable, 'procExtractor.py', run_id])
     proc2 = subprocess.Popen([sys.executable, 'probeExtractor.py', run_id])
 
-    edges_file = None
-    if os.environ.get('RCA_RAW_EDGES', '') == '1':
-        # Raw per-wakeup lines — short experiments only (hundreds of MB/min under load)
-        edges_file = open(f'data/edges_{run_id}.jsonl', 'w')
-        proc4 = subprocess.Popen(
-            ['stdbuf', '-oL', 'bpftrace', '-q', 'wakeupTracker.bt'],
-            stdout=edges_file,
-            text=True,
-        )
-    else:
-        # Aggregated per-window edges (default; bounded disk usage)
-        proc4 = subprocess.Popen([sys.executable, 'wakeupExtractor.py', run_id])
+    # Sampled raw wakeup edges (1-in-100 in-kernel) → data/edges_<run_id>.jsonl
+    edges_file = open(f'data/edges_{run_id}.jsonl', 'w')
+    proc4 = subprocess.Popen(
+        ['stdbuf', '-oL', 'bpftrace', '-q', 'wakeupTracker.bt'],
+        stdout=edges_file,
+        text=True,
+    )
 
     # start the stressor (shlex is used to lexically split the shell commands)
     stressor_parts = shlex.split(stressor_command)

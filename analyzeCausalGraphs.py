@@ -1,8 +1,15 @@
+"""
+analyzeCausalGraphs.py — builds per-window causal graphs from scored anomalies.
+
+Edge source: data/edges_<run_id>.jsonl — raw wakeupTracker.bt lines (sampled
+1-in-100 in-kernel, nanosecond timestamps since boot). The run's boot epoch is
+read from data/meta_<run_id>.json, so each window only ever sees its own run's
+edges; no global time-alignment heuristics are needed.
+"""
+
 import os
 import sys
-import glob
 import json
-import time
 import pandas as pd
 import networkx as nx
 from typing import List, Dict, Tuple, Any, Optional
@@ -17,10 +24,6 @@ NOISE_COMM_PREFIXES = (
     'cpuhp/',
 )
 
-# Gap larger than this splits anomaly windows into separate boot-era clusters
-CLUSTER_GAP_SEC = 3600.0
-
-
 def is_noise_edge(edge: Dict[str, Any]) -> bool:
     waker = edge.get('waker_comm', '')
     wakee = edge.get('wakee_comm', '')
@@ -29,13 +32,6 @@ def is_noise_edge(edge: Dict[str, Any]) -> bool:
     if any(wakee.startswith(p) for p in NOISE_COMM_PREFIXES):
         return True
     return False
-
-
-def edge_boot_relative_sec(raw_ts: float) -> float:
-    """Convert raw edge timestamp to seconds-since-boot (or pass through if already seconds)."""
-    if raw_ts > 1e11:  # nanoseconds since boot
-        return raw_ts / 1e9
-    return raw_ts
 
 
 # loading anomaly windows from scored_features.csv and merging overlapping intervals
@@ -100,285 +96,59 @@ def load_anomaly_windows(scored_features_path: str, padding_sec: float = 1.0) ->
     return merged_windows, df
 
 
-def _load_meta_boot_times() -> List[float]:
-    """Collect boot_time_epoch values from all meta JSON files."""
-    boots: List[float] = []
-    seen = set()
-    for meta_path in sorted(glob.glob('data/meta_*.json')) + ['data/run_meta.json']:
-        if not os.path.exists(meta_path) or os.path.getsize(meta_path) == 0:
-            continue
-        try:
-            with open(meta_path, 'r') as mf:
-                meta = json.load(mf)
-            if 'boot_time_epoch' in meta:
-                bt = float(meta['boot_time_epoch'])
-                key = round(bt, 3)
-                if key not in seen:
-                    seen.add(key)
-                    boots.append(bt)
-        except Exception:
-            continue
-    return boots
-
-
-def _sample_edge_boot_rel_times(edges_jsonl_path: str, max_samples: int = 50) -> Tuple[Optional[float], Optional[float], List[float]]:
-    """Return (first_ts, last_ts, evenly-ish sampled boot-relative seconds)."""
-    first_ts = None
-    last_ts = None
-    samples: List[float] = []
-    if not os.path.exists(edges_jsonl_path):
-        return None, None, samples
-
-    # First pass: count valid lines roughly via file size heuristic is hard;
-    # collect first N and track last, then sample by stride on a second light pass.
-    valid_count = 0
+def load_boot_epoch(run_id: str) -> Optional[float]:
+    """boot_time_epoch recorded in data/meta_<run_id>.json (written at collection start)."""
     try:
-        with open(edges_jsonl_path, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if not line or not line.startswith('{'):
-                    continue
-                try:
-                    d = json.loads(line)
-                    ts = edge_boot_relative_sec(float(d['timestamp']))
-                except Exception:
-                    continue
-                if first_ts is None:
-                    first_ts = ts
-                last_ts = ts
-                valid_count += 1
+        with open(f"data/meta_{run_id}.json", 'r') as mf:
+            return float(json.load(mf)['boot_time_epoch'])
     except Exception:
-        return first_ts, last_ts, samples
-
-    if valid_count == 0:
-        return first_ts, last_ts, samples
-
-    stride = max(1, valid_count // max_samples)
-    idx = 0
-    try:
-        with open(edges_jsonl_path, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if not line or not line.startswith('{'):
-                    continue
-                try:
-                    d = json.loads(line)
-                    ts = edge_boot_relative_sec(float(d['timestamp']))
-                except Exception:
-                    continue
-                if idx % stride == 0:
-                    samples.append(ts)
-                idx += 1
-    except Exception:
-        pass
-
-    return first_ts, last_ts, samples
+        return None
 
 
-def _cluster_windows(anomaly_windows: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
-    """Split windows into clusters separated by large time gaps (different boots/sessions)."""
-    if not anomaly_windows:
-        return []
-    ordered = sorted(anomaly_windows, key=lambda w: w['start'])
-    clusters: List[List[Dict[str, Any]]] = [[ordered[0]]]
-    for w in ordered[1:]:
-        if w['start'] - clusters[-1][-1]['end'] > CLUSTER_GAP_SEC:
-            clusters.append([w])
-        else:
-            clusters[-1].append(w)
-    return clusters
+# Parsed edge files are cached so several windows in the same run read the file once.
+_RAW_EDGE_CACHE: Dict[str, List[Dict[str, Any]]] = {}
 
 
-def _boot_hit_score(boot: float, windows: List[Dict[str, Any]], sample_ts: List[float]) -> int:
-    """How many sampled edge timestamps fall inside any window under this boot offset."""
-    hits = 0
-    for ts in sample_ts:
-        ep = boot + ts
-        for w in windows:
-            if w['start'] <= ep <= w['end']:
-                hits += 1
-                break
-    return hits
+def load_run_edges(run_id: str) -> List[Dict[str, Any]]:
+    """Load data/edges_<run_id>.jsonl, tagging each edge with absolute epoch seconds."""
+    path = f"data/edges_{run_id}.jsonl"
+    if path in _RAW_EDGE_CACHE:
+        return _RAW_EDGE_CACHE[path]
 
+    edges: List[Dict[str, Any]] = []
+    if not os.path.exists(path):
+        print(f"[-] Edge file '{path}' not found.")
+        _RAW_EDGE_CACHE[path] = edges
+        return edges
 
-def resolve_boot_times(edges_jsonl_path: str, anomaly_windows: List[Dict[str, Any]]) -> List[float]:
-    """
-    Resolve one or more boot_time_epoch values for edge↔window alignment.
+    boot = load_boot_epoch(run_id)
+    if boot is None:
+        print(f"[!] data/meta_{run_id}.json missing — cannot align '{path}' to wall-clock time.")
+        _RAW_EDGE_CACHE[path] = edges
+        return edges
 
-    A single global boot fails when scored features span multiple boots (e.g. old
-    corpus + a fresh quick-start run). We cluster windows by time gap and pick a
-    boot per cluster, verified by actual sample hits rather than a loose span check.
-    """
-    meta_boots = _load_meta_boot_times()
-    current_boot = time.time() - time.monotonic()
-    first_ts, last_ts, samples = _sample_edge_boot_rel_times(edges_jsonl_path)
-
-    if not anomaly_windows:
-        return meta_boots or [current_boot]
-
-    clusters = _cluster_windows(anomaly_windows)
-    chosen: List[float] = []
-    seen = set()
-
-    for cluster in clusters:
-        c_start = min(w['start'] for w in cluster)
-        c_end = max(w['end'] for w in cluster)
-        candidates: List[float] = []
-        candidates.extend(meta_boots)
-        candidates.append(current_boot)
-        if first_ts is not None:
-            # Align first/last edge to cluster bounds (handles reboot after capture)
-            candidates.append(c_start - first_ts)
-            if last_ts is not None:
-                candidates.append(c_end - last_ts)
-                candidates.append((c_start + c_end) / 2.0 - (first_ts + last_ts) / 2.0)
-
-        # Deduplicate roughly
-        uniq: List[float] = []
-        local_seen = set()
-        for b in candidates:
-            key = round(b, 2)
-            if key not in local_seen:
-                local_seen.add(key)
-                uniq.append(b)
-
-        if samples:
-            best = max(uniq, key=lambda b: _boot_hit_score(b, cluster, samples))
-            score = _boot_hit_score(best, cluster, samples)
-            if score == 0 and first_ts is not None:
-                # Fall back to first-edge alignment even if samples missed the short windows
-                best = c_start - first_ts
-                print(f"[!] No sampled edge hits for cluster "
-                      f"[{c_start:.0f}..{c_end:.0f}]; using inferred boot {best:.2f}")
-            elif abs(best - current_boot) > 1.0 and best not in meta_boots:
-                print(f"[!] Aligned boot_time_epoch for cluster "
-                      f"[{c_start:.0f}..{c_end:.0f}] -> {best:.2f} (hits={score})")
-        else:
-            best = meta_boots[0] if meta_boots else (c_start - first_ts if first_ts is not None else current_boot)
-
-        key = round(best, 3)
-        if key not in seen:
-            seen.add(key)
-            chosen.append(best)
-
-    if not chosen:
-        chosen = meta_boots or [current_boot]
-    return chosen
-
-
-def resolve_boot_time_epoch(edges_jsonl_path: str, anomaly_windows: List[Dict[str, Any]]) -> float:
-    """Backward-compatible single boot resolver (returns the first resolved boot)."""
-    boots = resolve_boot_times(edges_jsonl_path, anomaly_windows)
-    return boots[0]
-
-
-# reads jsonl file and matches edges into active windows
-def extract_edges_for_windows(
-    edges_jsonl_path: str,
-    anomaly_windows: List[Dict[str, Any]],
-    boot_time_epoch: float = None,
-    filter_noise: bool = True,
-    boot_times: List[float] = None,
-) -> Dict[str, List[Dict[str, Any]]]:
-    window_edges: Dict[str, List[Dict[str, Any]]] = {w['window_id']: [] for w in anomaly_windows}
-
-    if not os.path.exists(edges_jsonl_path):
-        print(f"[-] Edges file '{edges_jsonl_path}' not found.")
-        return window_edges
-
-    if boot_times is None:
-        if boot_time_epoch is not None:
-            boot_times = [boot_time_epoch]
-        else:
-            boot_times = resolve_boot_times(edges_jsonl_path, anomaly_windows)
-
-    with open(edges_jsonl_path, 'r') as f:
+    with open(path, 'r') as f:
         for line in f:
             line = line.strip()
-            if not line or not line.startswith('{'):
+            if not line.startswith('{'):
                 continue
             try:
                 edge = json.loads(line)
             except json.JSONDecodeError:
                 continue
-
-            if filter_noise and is_noise_edge(edge):
+            if is_noise_edge(edge):
                 continue
-
             raw_ts = float(edge.get('timestamp', 0))
-            boot_rel = edge_boot_relative_sec(raw_ts)
+            edge['_epoch_sec'] = boot + raw_ts / 1e9  # tracker timestamps are ns since boot
+            edges.append(edge)
 
-            matched = False
-            for boot in boot_times:
-                edge_epoch = boot + boot_rel if raw_ts > 1e11 else boot_rel
-                # If timestamp was already wall-clock seconds, don't add boot
-                if raw_ts <= 1e11:
-                    edge_epoch = raw_ts
-                for win in anomaly_windows:
-                    if win['start'] <= edge_epoch <= win['end']:
-                        # Shallow copy so multi-window / multi-boot doesn't share mutable state
-                        tagged = dict(edge)
-                        tagged['_epoch_sec'] = edge_epoch
-                        window_edges[win['window_id']].append(tagged)
-                        matched = True
-                        break
-                if matched:
-                    break
-
-    return window_edges
+    _RAW_EDGE_CACHE[path] = edges
+    return edges
 
 
-def _load_edge_data(path: str) -> List[Dict[str, Any]]:
-    """Load one run's aggregated edge windows (data/edgeData_<run_id>.jsonl)."""
-    records: List[Dict[str, Any]] = []
-    if not os.path.exists(path):
-        return records
-    with open(path, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(rec, dict) and 'window_start' in rec and 'window_end' in rec:
-                records.append(rec)
-    return records
-
-
-# Run edge files are small; cache parsed contents so several anomaly windows in
-# the same run don't re-read the file.
-_EDGE_DATA_CACHE: Dict[str, List[Dict[str, Any]]] = {}
-
-
-def extract_edges_from_edge_data(
-    edge_data_path: str,
-    win: Dict[str, Any],
-    filter_noise: bool = True,
-) -> List[Dict[str, Any]]:
-    """Aggregate comm-pair edge counts from one run's edge windows overlapping `win`."""
-    if edge_data_path not in _EDGE_DATA_CACHE:
-        _EDGE_DATA_CACHE[edge_data_path] = _load_edge_data(edge_data_path)
-
-    pair_counts: Dict[Tuple[str, str], int] = {}
-    for rec in _EDGE_DATA_CACHE[edge_data_path]:
-        if rec['window_end'] < win['start'] or rec['window_start'] > win['end']:
-            continue
-        for entry in rec.get('edges', []):
-            try:
-                wakee, waker, count = str(entry[0]), str(entry[1]), int(entry[2])
-            except (IndexError, TypeError, ValueError):
-                continue
-            edge = {'wakee_comm': wakee, 'waker_comm': waker, 'count': count}
-            if filter_noise and is_noise_edge(edge):
-                continue
-            pair_counts[(wakee, waker)] = pair_counts.get((wakee, waker), 0) + count
-
-    return [
-        {'wakee_comm': key[0], 'waker_comm': key[1], 'count': count}
-        for key, count in pair_counts.items()
-    ]
+def edges_for_window(run_id: str, win: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """All sampled wakeup edges from one run that fall inside `win`."""
+    return [e for e in load_run_edges(run_id) if win['start'] <= e['_epoch_sec'] <= win['end']]
 
 
 def parse_edge_nodes(edge: Dict[str, Any]) -> Tuple[str, str]:
@@ -500,30 +270,11 @@ def _graph_to_jsonable(G: nx.DiGraph) -> Dict[str, Any]:
 
 def main():
     scored_features_file = sys.argv[1] if len(sys.argv) > 1 else 'data/scored_features.csv'
-    edges_file = sys.argv[2] if len(sys.argv) > 2 else 'data/edges.jsonl'
     summary_output_file = 'data/causal_summaries.json'
 
     anomaly_windows, df_scored = load_anomaly_windows(scored_features_file, padding_sec=1.0)
     if not anomaly_windows:
         return []
-
-    # Prefer per-run aggregated edge files (data/edgeData_<run_id>.jsonl).
-    # Legacy raw edges.jsonl remains supported as a fallback for old corpora.
-    windows_needing_legacy = []
-    for win in anomaly_windows:
-        run_id = win.get('run_id')
-        agg_path = f"data/edgeData_{run_id}.jsonl" if run_id else None
-        if not agg_path or not os.path.exists(agg_path):
-            windows_needing_legacy.append(win)
-
-    legacy_edges_map: Dict[str, List[Dict[str, Any]]] = {}
-    if windows_needing_legacy and os.path.exists(edges_file):
-        boot_times = resolve_boot_times(edges_file, windows_needing_legacy)
-        print(f"[+] Legacy edges.jsonl fallback for {len(windows_needing_legacy)} window(s) "
-              f"({len(boot_times)} boot_time_epoch candidate(s))")
-        legacy_edges_map = extract_edges_for_windows(
-            edges_file, windows_needing_legacy, boot_times=boot_times, filter_noise=True
-        )
 
     summaries = []
     graphs_data = {}
@@ -531,11 +282,7 @@ def main():
     for win in anomaly_windows:
         w_id = win['window_id']
         run_id = win.get('run_id')
-        agg_path = f"data/edgeData_{run_id}.jsonl" if run_id else None
-        if agg_path and os.path.exists(agg_path):
-            edges = extract_edges_from_edge_data(agg_path, win, filter_noise=True)
-        else:
-            edges = legacy_edges_map.get(w_id, [])
+        edges = edges_for_window(run_id, win) if run_id else []
 
         # Extract rows for this window
         if not df_scored.empty:

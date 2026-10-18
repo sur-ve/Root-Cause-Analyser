@@ -14,15 +14,20 @@
  *     "wakee_comm": "<comm of wakee>"
  *   }
  *
+ * Sampling: only 1 in 100 wakeup events is emitted (/rand % 100 == 0/).
+ * The full firehose is ~500 MB/min under stress; sampling keeps per-run
+ * files at a few MB while staying statistically representative for graphs.
+ *
  * Direction used later (analyzeCausalGraphs.py):
  *   Wakee -> Waker  (wakee was blocked waiting on / unblocked by waker)
  *
- * Run (usually via parentProcess.py):
- *   sudo stdbuf -oL bpftrace wakeupTracker.bt >> data/edges.jsonl
+ * Run (usually via parentProcess.py / rcaDaemon.py):
+ *   sudo stdbuf -oL bpftrace -q wakeupTracker.bt > data/edges_<run_id>.jsonl
  */
 
 tracepoint:sched:sched_wakeup,
 tracepoint:sched:sched_wakeup_new
+/rand % 100 == 0/
 {
 	printf("{\"timestamp\": %llu, \"waker_tid\": %d, \"waker_pid\": %d, \"waker_comm\": \"%s\", \"wakee_tid\": %d, \"wakee_comm\": \"%s\"}\n",
 		nsecs,

@@ -85,10 +85,10 @@ else
 fi
 
 # ---------------------------------------------------------------- stale procs
-stale=$(pgrep -af 'bpftrace|procExtractor|probeExtractor|wakeupExtractor|rcaDaemon|parentProcess' || true)
+stale=$(pgrep -af 'bpftrace|procExtractor|probeExtractor|rcaDaemon|parentProcess' || true)
 if [ -n "$stale" ]; then
     if [ "$CLEAN" = "1" ]; then
-        pkill -INT -f 'bpftrace|procExtractor|probeExtractor|wakeupExtractor|rcaDaemon|parentProcess' || true
+        pkill -INT -f 'bpftrace|procExtractor|probeExtractor|rcaDaemon|parentProcess' || true
         sleep 2
         pkill -f 'bpftrace' || true
         ok "stale collectors cleaned (--clean)"
@@ -113,30 +113,42 @@ rm -f "$smoke"
 
 # ---------------------------------------------------------------- probe scripts smoke
 check_script() {
-    local script="$1" marker="$2"
+    # usage: check_script <script.bt> [expected-marker] [extra bpftrace flags]
+    local script="$1" marker="${2:-}" extra="${3:-}"
     local out; out=$(mktemp)
     echo "  ..    smoke test: $script (8s)"
-    timeout 8 stdbuf -oL bpftrace -q -f json "$script" >"$out" 2>&1
+    timeout 8 stdbuf -oL bpftrace -q $extra "$script" >"$out" 2>&1
     local rc=$?
     if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]; then
         bad "$script failed to run (rc=$rc):"
         head -3 "$out" | sed 's/^/        /'
-    elif ! grep -q "$marker" "$out"; then
+    elif grep -q 'ERROR' "$out"; then
+        bad "$script reported an error:"
+        head -3 "$out" | sed 's/^/        /'
+    elif [ -n "$marker" ] && ! grep -q "$marker" "$out"; then
         bad "$script produced no '$marker' marker (check script syntax / probes)"
         head -3 "$out" | sed 's/^/        /'
     else
-        ok "$script runs and emits '$marker'"
+        if [ -n "$marker" ]; then
+            ok "$script runs and emits '$marker'"
+        else
+            ok "$script runs"
+        fi
     fi
     rm -f "$out"
 }
 
-for s in probes.bt wakeupAggregator.bt; do
-    if [ -f "$s" ]; then
-        check_script "$s" "BEGIN_NS"
-    else
-        bad "missing script: $s"
-    fi
-done
+if [ -f probes.bt ]; then
+    check_script probes.bt "BEGIN_NS" "-f json"
+else
+    bad "missing script: probes.bt"
+fi
+
+if [ -f wakeupTracker.bt ]; then
+    check_script wakeupTracker.bt
+else
+    bad "missing script: wakeupTracker.bt"
+fi
 
 echo
 if [ "$fail" -eq 0 ]; then

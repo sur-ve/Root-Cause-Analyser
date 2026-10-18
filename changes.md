@@ -8,11 +8,11 @@ Tracking doc — the full plan lives in [PLAN.md](PLAN.md).
       (`BEGIN_NS` / `WINDOW_END_NS` from `probes.bt`) converted with
       `boot_time_epoch` from `data/meta_<run_id>.json`; the old
       "fin_timestamp - 3.0" guess is gone.
-* [x] **Bounded edge collection** — `wakeupAggregator.bt` + `wakeupExtractor.py`
-      write aggregated per-3s windows to `data/edgeData_<run_id>.jsonl`
-      (KB/min instead of hundreds of MB/min). The global `data/edges.jsonl`
-      (3.18 GB) was removed; the raw tracker is still available via
-      `RCA_RAW_EDGES=1` for short experiments.
+* [x] **Bounded edge collection (simplified)** — `wakeupTracker.bt` emits raw
+      JSONL with **1-in-100 in-kernel sampling** (`/rand % 100 == 0/`) into
+      per-run `data/edges_<run_id>.jsonl` (a few MB per run, not ~530 MB/min).
+      The `wakeupAggregator.bt` approach was abandoned: bpftrace 0.20.2 has no
+      `for` loops and rejected string-concat map keys.
 * [x] **Futex probe op-filter** (only waiting ops: 0/6/9/11) so lock metrics
       are meaningful instead of counting every futex syscall.
 * [x] **procExtractor robustness** — tolerates kernels without all
@@ -23,9 +23,14 @@ Tracking doc — the full plan lives in [PLAN.md](PLAN.md).
 * [x] **Safer fio stressors** — 512M / 1G files with `--unlink=1` and
       `--filename=data/scratch_*.dat` (disk was at 97 %).
 * [x] **`testbed/preflight.sh`** — environment/safety checks plus bpftrace
-      smoke tests for `probes.bt` and `wakeupAggregator.bt`.
-* [x] **Causal graphs** — per-run anomaly windows (no cross-run merging),
-      aggregated-edge loading with weights, legacy `edges.jsonl` fallback kept.
+      smoke tests for `probes.bt` and `wakeupTracker.bt`.
+* [x] **Causal graphs** — per-run anomaly windows; edges read directly from
+      `data/edges_<run_id>.jsonl` and aligned with `meta_<run_id>.json`
+      (all boot-time inference heuristics removed).
+* [x] **Online LLM (optional)** — `ragExplainer.py` calls any OpenAI-compatible
+      `/chat/completions` API when `RCA_LLM_API_KEY` is set
+      (`RCA_LLM_BASE_URL`, `RCA_LLM_MODEL` optional overrides). No local
+      install; the grounded template report is the fallback.
 
 ## Next (Phase 2+)
 

@@ -11,5 +11,8 @@ numpy
 # chromadb
 # sentence-transformers
 
-# Optional: local LLM backend
-# ollama   # or configure via OPENAI_API_KEY for OpenAI
+# Optional: online LLM backend for the RAG review (no extra install)
+# Any OpenAI-compatible /chat/completions API works:
+#   export RCA_LLM_API_KEY=...
+#   export RCA_LLM_BASE_URL=http://...   # optional
+#   export RCA_LLM_MODEL=...             # optional

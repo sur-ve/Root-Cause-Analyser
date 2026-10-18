@@ -58,7 +58,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-`requirements.txt` covers the offline pipeline (`scikit-learn`, `networkx`, `pandas`, `numpy`). Optional lines exist for vector-store RAG (`langchain`, `chromadb`, `sentence-transformers`) or a local Ollama LLM backend.
+`requirements.txt` covers the offline pipeline (`scikit-learn`, `networkx`, `pandas`, `numpy`). The optional LLM review layer needs **no extra install** — it calls any OpenAI-compatible API when `RCA_LLM_API_KEY` is set.
 
 ---
 
@@ -76,7 +76,7 @@ pip install -r requirements.txt
 |  +-------+-------+  +--------+-------+  +----------+----------+  |
 |          |                   |                     |             |
 |          v                   v                     v             |
-|  procfsData_*.jsonl   probeData_*.jsonl      edges.jsonl         |
+|  procfsData_*.jsonl   probeData_*.jsonl   edges_<run_id>.jsonl  |
 |          |                   |                     |             |
 |          +---------+---------+                     |             |
 |                    v                               |             |
@@ -123,7 +123,7 @@ RCA/
 ├── procExtractor.py          # /proc PSI + vmstat sampler
 ├── probeExtractor.py         # Parses probes.bt JSON output
 ├── probes.bt                 # Latency / lock / IO / OOM bpftrace maps
-├── wakeupTracker.bt          # sched_wakeup → edges.jsonl
+├── wakeupTracker.bt          # sched_wakeup → edges_<run_id>.jsonl (1-in-100 sampled)
 ├── featureExtractor.py       # Merge + label features (auto-discovers runs)
 ├── anomalyDetection.py       # Production OneClassSVM scorer
 ├── detectorBenchmark.py      # OCSVM vs IsolationForest vs LOF
@@ -148,7 +148,7 @@ RCA/
 └── data/                     # Runtime artefacts (generated)
     ├── procfsData_*.jsonl
     ├── probeData_*.jsonl
-    ├── edges.jsonl
+    ├── edges_<run_id>.jsonl
     ├── meta_*.json
     ├── combined_features.csv
     ├── scored_features.csv
@@ -182,7 +182,7 @@ Behaviour:
   - `procExtractor.py <run_id>`
   - `probeExtractor.py <run_id>`
   - stressor command from `STRESSORS` (or CLI override)
-  - `bpftrace wakeupTracker.bt` → appends `data/edges.jsonl`
+  - `bpftrace -q wakeupTracker.bt` → `data/edges_<run_id>.jsonl` (1-in-100 in-kernel sampling)
 - When the stressor exits, collectors continue ~10s (cooldown), then receive `SIGINT`.
 - On `KeyboardInterrupt`, all children are signalled and waited on (with kill fallback).
 
@@ -308,7 +308,7 @@ python3 overallBenchmark.py --test-size 0.3 --nu 0.05
 - Builds a retrieval query from labeled causes, candidate roots, paths, and (if unlabeled) metric keywords.
 - Classifies cause: labeled stressor → metric heuristics → retrieved doc title.
 - Collects evidence (OOM, swap, PSI, lock, I/O, graph) and remediation from runbooks.
-- Optional Ollama hook (`query_local_ollama`) is present but commented out by default.
+- Optional online LLM review via any OpenAI-compatible API: set `RCA_LLM_API_KEY` (plus optional `RCA_LLM_BASE_URL`, `RCA_LLM_MODEL`); no local install, template report is the fallback.
 - Writes `data/rca_report.txt` and `data/rca_report.json`.
 
 #### Knowledge corpus (`knowledge/`)
@@ -347,7 +347,7 @@ python3 rcaDaemon.py --no-collect --interval 300   # analyse existing data
 sudo python3 rcaDaemon.py --interval 300           # collect + analyse
 ```
 
-Starts collectors (unless `--no-collect`), periodically runs the four analysis stages, rotates `edges.jsonl` when > ~50 MB, restarts dead collectors.
+Starts collectors (unless `--no-collect`), periodically runs the four analysis stages, keeps edges in per-run files (`data/edges_<run_id>.jsonl`), restarts dead collectors.
 
 #### `preprocessing.md`
 
@@ -503,5 +503,5 @@ See `changes.md`:
 
 - Collect more / cleaner `default` baselines for a tighter Normal boundary
 - Stronger filtering of noisy kernel wakeups (IRQ threads, kworkers)
-- Optional upgrade from TF-IDF to dense embeddings when Ollama / OpenAI is available
+- Optional upgrade from TF-IDF to dense embeddings (would need an embedding model or API)
 - Tune OneClassSVM `nu` if Normal FPR drifts after new data collection

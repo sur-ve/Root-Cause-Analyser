@@ -16,8 +16,8 @@ Options:
     --run-id ID    Base run_id for rotating data files (default: rolling)
     --no-collect   Skip bpftrace/procfs collection (analyse existing data only)
 
-Wakeup edges are aggregated per-run (data/edgeData_<run_id>.jsonl), so no
-global edges file rotation is needed.
+Wakeup edges are written per-run (data/edges_<run_id>.jsonl), sampled
+1-in-100 in-kernel by wakeupTracker.bt, so no global edges rotation is needed.
 """
 
 import os
@@ -81,17 +81,20 @@ def start_collectors(run_id: str):
         [sys.executable, os.path.join(BASE_DIR, 'probeExtractor.py'), run_id],
         cwd=BASE_DIR
     )
-    # Aggregated per-3s wakeup edges (data/edgeData_<run_id>.jsonl) — bounded disk usage
+    # Sampled raw wakeup edges (1-in-100 in-kernel) → data/edges_<run_id>.jsonl
+    edges_file = open(os.path.join(BASE_DIR, f'data/edges_{run_id}.jsonl'), 'w')
     proc3 = subprocess.Popen(
-        [sys.executable, os.path.join(BASE_DIR, 'wakeupExtractor.py'), run_id],
-        cwd=BASE_DIR
+        ['stdbuf', '-oL', 'bpftrace', '-q', os.path.join(BASE_DIR, 'wakeupTracker.bt')],
+        stdout=edges_file,
+        text=True,
+        cwd=BASE_DIR,
     )
 
     print(f"[rcaDaemon] Collectors started (run_id={run_id})")
-    return proc1, proc2, proc3
+    return proc1, proc2, proc3, edges_file
 
 
-def stop_collectors(procs):
+def stop_collectors(procs, edges_file=None):
     print("[rcaDaemon] Stopping collectors...")
     for p in procs:
         try:
@@ -104,6 +107,11 @@ def stop_collectors(procs):
         except subprocess.TimeoutExpired:
             p.kill()
             p.wait()
+    if edges_file is not None:
+        try:
+            edges_file.close()
+        except Exception:
+            pass
     print("[rcaDaemon] Collectors stopped.")
 
 
@@ -156,12 +164,13 @@ def main():
 
     run_id = make_run_id(args.run_id)
     collector_procs = []
+    edges_file = None
 
     if not args.no_collect:
         if os.geteuid() != 0:
             print("[rcaDaemon] ERROR: Must run as root (sudo) to start bpftrace/procExtractor collectors.")
             sys.exit(1)
-        proc1, proc2, proc3 = start_collectors(run_id)
+        proc1, proc2, proc3, edges_file = start_collectors(run_id)
         collector_procs = [proc1, proc2, proc3]
 
     print(f"[rcaDaemon] Running. Analysis interval = {args.interval}s. Ctrl+C to stop.")
@@ -171,9 +180,8 @@ def main():
         while _running:
             now = time.time()
             if now - last_analysis >= args.interval:
-                # NOTE: edges are now written per-run as aggregated windows
-                # (data/edgeData_<run_id>.jsonl), so the old global edges.jsonl
-                # rotation is no longer needed here.
+                # NOTE: edges are written per-run (data/edges_<run_id>.jsonl),
+                # so the old global edges.jsonl rotation is no longer needed.
                 run_analysis_cycle(run_id)
                 last_analysis = now
 
@@ -183,9 +191,9 @@ def main():
                     if p.poll() is not None:
                         print(f"[rcaDaemon] Collector process exited unexpectedly (pid {p.pid}). Attempting restart...")
                         # For simplicity, stop everything and re-start
-                        stop_collectors(collector_procs)
+                        stop_collectors(collector_procs, edges_file)
                         run_id = make_run_id(args.run_id)
-                        proc1, proc2, proc3 = start_collectors(run_id)
+                        proc1, proc2, proc3, edges_file = start_collectors(run_id)
                         collector_procs = [proc1, proc2, proc3]
                         break
 
@@ -193,7 +201,7 @@ def main():
 
     finally:
         if collector_procs:
-            stop_collectors(collector_procs)
+            stop_collectors(collector_procs, edges_file)
         print("[rcaDaemon] Exited cleanly.")
 
 if __name__ == '__main__':

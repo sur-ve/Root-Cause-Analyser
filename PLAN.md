@@ -209,10 +209,12 @@ Expected artefacts for the evaluator:
 
 1. **Where does the full 10-fault matrix run?** Recommended: this workstation with cgroup guards for all
    except `memStressor2`, which runs in a VM (or is skipped/documented).
-2. **Is a live LLM diagnosis required for the evaluator?** If yes → Phase 5; if no → grounded
-   template report is already defensible.
-3. **Raw edges for the short demo?** Recommended: aggregated by default, `--raw-edges` only for
-   the ≤60 s demo runs to show thread-level paths.
+2. **Live LLM diagnosis?** Decided (2026-10-18): **online OpenAI-compatible API**
+   (`RCA_LLM_API_KEY`) — no local model install; the grounded template report is the
+   fallback when no key is set.
+3. **Edge fidelity?** Decided (2026-10-18): raw tracker with fixed 1-in-100 in-kernel
+   sampling, per-run files; temporarily remove the sampling predicate if a demo needs
+   full fidelity (files grow ~100×).
 
 ---
 
@@ -225,34 +227,44 @@ Expected artefacts for the evaluator:
 - [x] 0.3 fio stressors bounded (512M / 1G, `--unlink=1`, `--filename=data/scratch_*`)
 - [x] 0.4 `kernel.sched_schedstats` handled by `testbed/preflight.sh`
 - [x] 0.5 `changes.md` refreshed (data.txt left as a historical review)
-- [x] 1.1/1.2 `wakeupAggregator.bt` + `wakeupExtractor.py`; per-run `edgeData` files wired
-      into `parentProcess.py` and `rcaDaemon.py`
+- [x] 1.1/1.2 per-run edge files wired into `parentProcess.py` and `rcaDaemon.py`
+      (aggregation attempt replaced by sampled raw edges — see below)
 - [x] 1.3 stressor start/end + label/family in meta and `data/ground_truth.jsonl`
 - [x] 1.4 `probeExtractor.py` window stamps from the bpftrace clock
 - [x] 1.5 futex wait-op filter in `probes.bt`
 - [x] 1.6 `procExtractor.py` robustness (missing zones, counter resets)
-- [x] Analyzer: per-run windows, aggregated edge loading, weighted graphs, legacy fallback
+- [x] Analyzer: per-run windows, per-run edge loading, weighted graphs
 - [ ] 1.7 per-second rate features (deferred to Phase 2 with the detector retrain)
 
-Unit-tested without root: `WindowAccumulator` (aggregation + boundary chaining),
-`ProbeStreamParser` (markers + legacy fallback), analyzer aggregated path and legacy path
-(synthetic `edgeData_*` / `edges.jsonl`).
+Unit-tested without root: `ProbeStreamParser` (markers), analyzer per-run raw edge path
+(synthetic `data/edges_*` + `meta_*`), online LLM client (local stub server).
 
-### 2026-10-18 (later) — bpftrace 0.20 compatibility fix
+### 2026-10-18 (later) — simplified edge collection + online LLM
 
-The first preflight run failed: `wakeupAggregator.bt:39: syntax error, unexpected for`.
-Reason: `for` loops do not exist in bpftrace **0.20.2** (the installed version);
-`next/bpftraceReference.md` documents a newer release. Rewritten to use
-`print(@edges)` with `-f json` (same proven mechanism as `probes.bt`) and a
-single concatenated string key `"<wakee>|<waker>"`. `wakeupExtractor.py` now
-parses the JSON envelope; local unit tests pass. Re-run preflight to verify.
+`for` loops and string-concat map keys are unreliable on bpftrace **0.20.2**
+(the installed version; `next/bpftraceReference.md` documents a newer
+release). Decision: drop in-kernel aggregation entirely and use the proven
+raw tracker:
+
+- `wakeupTracker.bt` — same raw JSONL, plus `/rand % 100 == 0/` (1-in-100)
+  sampling → a few MB per run instead of ~530 MB/min
+- per-run `data/edges_<run_id>.jsonl`; exact alignment via
+  `boot_time_epoch` from `data/meta_<run_id>.json`
+- `analyzeCausalGraphs.py` reads the per-run file directly — boot-time
+  inference, aggregated `edgeData` loading, and the global `edges.jsonl`
+  fallback were all removed
+- deleted `wakeupAggregator.bt` / `wakeupExtractor.py` (recoverable from git)
+
+`ragExplainer.py` gained an optional online LLM review (OpenAI-compatible
+`/chat/completions`, `RCA_LLM_API_KEY`; no local install). Verified against a
+local stub server.
 
 Pending sudo smoke test (bpftrace cannot run as a normal user):
 
 ```bash
 sudo bash testbed/preflight.sh --clean
 sudo python3 parentProcess.py default
-ls -la data/edgeData_default.jsonl data/ground_truth.jsonl
+ls -la data/edges_default.jsonl data/ground_truth.jsonl
 ```
 
 Next: Phase 2 — collect `default` baselines, persist the OneClassSVM

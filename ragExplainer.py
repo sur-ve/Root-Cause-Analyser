@@ -3,7 +3,6 @@ import sys
 import glob
 import json
 import urllib.request
-import urllib.error
 import numpy as np
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -65,15 +64,65 @@ class KnowledgeCorpus:
             })
         return results
 
-def query_local_ollama(prompt: str, model: str = 'llama3.2') -> Optional[str]:
-    url = 'http://localhost:11434/api/generate'
-    payload = json.dumps({'model': model, 'prompt': prompt, 'stream': False}).encode('utf-8')
-    req = urllib.request.Request(url, data=payload, headers={'Content-Type': 'application/json'})
+# --------------------------------------------------------------------------
+# Optional online LLM (OpenAI-compatible chat completions API)
+#
+# Enabled by setting RCA_LLM_API_KEY. Works with OpenAI, Groq, OpenRouter,
+# Together, etc. — any provider exposing /chat/completions:
+#
+#   export RCA_LLM_API_KEY=sk-...
+#   export RCA_LLM_BASE_URL=https://api.groq.com/openai/v1   # optional
+#   export RCA_LLM_MODEL=llama-3.3-70b-versatile             # optional
+#
+# No local installation or model download is needed.
+# --------------------------------------------------------------------------
+
+LLM_BASE_URL_DEFAULT = 'https://api.openai.com/v1'
+LLM_MODEL_DEFAULT = 'gpt-4o-mini'
+
+LLM_SYSTEM_PROMPT = (
+    "You are a Linux performance root-cause analysis assistant. "
+    "Use ONLY the evidence given in the user message. Do not invent metrics, "
+    "process names, or runbook content. If the evidence is insufficient, say "
+    "so explicitly. Reply with at most three short sections: "
+    "Likely root cause, Key evidence, Suggested action."
+)
+
+
+def query_online_llm(prompt: str) -> Optional[str]:
+    """Ask an OpenAI-compatible /chat/completions API.
+
+    Returns None when disabled (RCA_LLM_API_KEY unset) or when the call fails
+    for any reason, so callers can fall back to the grounded template report.
+    """
+    api_key = os.environ.get('RCA_LLM_API_KEY', '').strip()
+    if not api_key:
+        return None
+
+    base_url = os.environ.get('RCA_LLM_BASE_URL', LLM_BASE_URL_DEFAULT).rstrip('/')
+    model = os.environ.get('RCA_LLM_MODEL', LLM_MODEL_DEFAULT)
+    payload = json.dumps({
+        'model': model,
+        'messages': [
+            {'role': 'system', 'content': LLM_SYSTEM_PROMPT},
+            {'role': 'user', 'content': prompt},
+        ],
+        'temperature': 0.2,
+    }).encode('utf-8')
+    req = urllib.request.Request(
+        f'{base_url}/chat/completions',
+        data=payload,
+        headers={
+            'Content-Type': 'application/json',
+            'Authorization': f'Bearer {api_key}',
+        },
+    )
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode('utf-8'))
-            return data.get('response')
-    except (urllib.error.URLError, TimeoutError, Exception):
+        return data['choices'][0]['message']['content'].strip()
+    except Exception as e:
+        print(f"[!] Online LLM call failed ({type(e).__name__}: {e}) — using grounded template only.")
         return None
 
 LABEL_TO_DOC_ID = {
@@ -253,6 +302,11 @@ def explain_anomalies(causal_summaries_file: str = CAUSAL_SUMMARIES_FILE, knowle
         return []
 
     corpus = KnowledgeCorpus(knowledge_dir)
+    if os.environ.get('RCA_LLM_API_KEY', '').strip():
+        print(f"[i] Online LLM enabled: {os.environ.get('RCA_LLM_MODEL', LLM_MODEL_DEFAULT)} "
+              f"@ {os.environ.get('RCA_LLM_BASE_URL', LLM_BASE_URL_DEFAULT)}")
+    else:
+        print("[i] Online LLM disabled (set RCA_LLM_API_KEY to enable; template report only).")
     reports = []
     full_text_report = []
 
@@ -265,24 +319,24 @@ def explain_anomalies(causal_summaries_file: str = CAUSAL_SUMMARIES_FILE, knowle
         query = build_retrieval_query(win)
         retrieved_docs = corpus.retrieve(query, top_k=2) if query.strip() else []
 
-        # Check if Ollama is available
-        llm_response = None
-        prompt = (
-            "You are a Linux performance root-cause assistant.\n"
-            "Using ONLY the provided context (metrics, causal paths, docs),\n"
-            "state the most likely root cause, evidence, and a short remediation.\n"
-            f"Context:\nWindow ID: {win.get('window_id')}\n"
-            f"Candidate Roots: {win.get('candidate_roots')}\n"
-            f"Sample Paths: {win.get('sample_paths')}\n"
-            f"Top Metrics: {win.get('top_metrics')}\n"
-            f"Retrieved Runbook Docs: {[d['content'] for d in retrieved_docs]}\n"
-        )
-        # Attempt LLM if running
-        # llm_response = query_local_ollama(prompt)
-
         report_text = synthesize_grounded_report(win, retrieved_docs)
+
+        # Optional online LLM review (skipped when RCA_LLM_API_KEY is unset)
+        llm_response = None
+        if os.environ.get('RCA_LLM_API_KEY', '').strip():
+            prompt = (
+                "Below is an evidence-grounded RCA draft produced by rule-based analysis "
+                "of kernel telemetry for ONE anomaly window. Review it strictly against "
+                "the evidence it cites.\n\n"
+                f"{report_text}\n"
+                "State the most likely root cause and the single most informative piece "
+                "of evidence for it. If the draft is not supported by the evidence, say "
+                "what is missing instead of guessing."
+            )
+            llm_response = query_online_llm(prompt)
+
         if llm_response:
-            report_text += f"\nLLM Analysis:\n{llm_response}\n"
+            report_text += f"\nLLM review (online API):\n{llm_response}\n"
 
         print(report_text)
         full_text_report.append(report_text)
@@ -291,7 +345,8 @@ def explain_anomalies(causal_summaries_file: str = CAUSAL_SUMMARIES_FILE, knowle
             'start': win.get('start'),
             'end': win.get('end'),
             'report': report_text,
-            'retrieved_docs': [d['id'] for d in retrieved_docs]
+            'retrieved_docs': [d['id'] for d in retrieved_docs],
+            'llm_review': llm_response,
         })
 
     os.makedirs('data', exist_ok=True)
