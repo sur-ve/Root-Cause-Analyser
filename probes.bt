@@ -1,0 +1,90 @@
+BEGIN
+{
+	// bpftrace attach time (boot-relative ns) — lets probeExtractor stamp the
+	// first window precisely instead of guessing "fin_timestamp - 3.0"
+	printf("BEGIN_NS %llu\n", nsecs);
+}
+
+kprobe:vfs_read {
+	@entry_vfs[tid] = nsecs;
+}
+
+kretprobe:vfs_read /@entry_vfs[tid]/
+{
+	@vfsreadtime[comm] = sum(nsecs - @entry_vfs[tid]);
+	delete(@entry_vfs[tid]);
+}
+
+tracepoint:sched:sched_stat_wait {
+	@rq_time[args.comm] = sum(args.delay);
+}
+
+tracepoint:sched:sched_stat_runtime {
+	@runtime[comm] = sum(args.runtime);
+}
+
+tracepoint:syscalls:sys_enter_futex {
+	// Only waiting ops (FUTEX_WAIT=0, LOCK_PI=6, WAIT_BITSET=9, WAIT_REQUEUE_PI=11;
+	// low 7 bits mask off PRIVATE/CLOCK_REALTIME flags) — counting every futex
+	// syscall (wakes, requeues, fast paths) inflated wait counts ~100x.
+	$op = args.op & 0x7f;
+	if ($op == 0 || $op == 6 || $op == 9 || $op == 11) {
+		@entry_fut[tid] = nsecs;
+	}
+}
+
+tracepoint:syscalls:sys_exit_futex /@entry_fut[tid]/ {
+	@futex_wait_time[comm] = sum(nsecs - @entry_fut[tid]);
+	@futex_wait_count[comm] = count();
+	delete(@entry_fut[tid]);
+}
+
+kprobe:out_of_memory {
+	@entry_oom[tid] = nsecs;
+}
+
+kretprobe:out_of_memory /@entry_oom[tid]/ {
+	@oom_time[comm] = sum(nsecs - @entry_oom[tid]);
+	delete(@entry_oom[tid]);
+}
+
+tracepoint:sched:sched_stat_iowait {
+	@iowait_time[args.comm] = sum(args.delay);
+}
+
+tracepoint:block:block_rq_complete  {
+	@sector_count = sum(args.nr_sector);
+}
+
+tracepoint:lock:contention_begin {
+	@entry_lock[tid] = nsecs;
+}
+
+tracepoint:lock:contention_end /@entry_lock[tid]/ {
+	@locktime[comm] = sum(nsecs - @entry_lock[tid]);
+	delete(@entry_lock[tid]);
+}
+
+interval:s:3{
+	// window boundary on the bpftrace clock (boot-relative ns)
+	printf("WINDOW_END_NS %llu\n", nsecs);
+	print(@vfsreadtime);
+	print(@rq_time);
+	print(@runtime);
+	print(@futex_wait_time);
+	print(@futex_wait_count);
+	print(@oom_time);
+	print(@iowait_time);
+	print(@sector_count);
+	print(@locktime);
+	print("END");
+	clear(@vfsreadtime);
+	clear(@rq_time);
+	clear(@runtime);
+	clear(@futex_wait_time);
+	clear(@futex_wait_count);
+	clear(@oom_time);
+	clear(@iowait_time);
+	clear(@sector_count);
+	clear(@locktime);
+}

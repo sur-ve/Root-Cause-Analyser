@@ -1,0 +1,15 @@
+# Core dependencies (required for all pipeline stages)
+scikit-learn==1.9.1
+networkx==3.7
+pandas
+numpy
+
+# Optional: RAG LLM layer (enhanced embedding-based retrieval)
+# Uncomment to enable vector-store based retrieval (requires more disk/RAM)
+# langchain
+# langchain-community
+# chromadb
+# sentence-transformers
+
+# Optional: local LLM backend
+# ollama   # or configure via OPENAI_API_KEY for OpenAI

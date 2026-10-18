@@ -1,0 +1,35 @@
+
+  What exists today is an offline, stressor-driven pipeline through collection → features → Isolation Forest → causal graphs. The
+  stated end goal (background monitoring + RAG explanation to the user) is not implemented (ragExplainer.py / daemon missing).
+
+  What can work
+
+  • Collection via sudo python3 parentProcess.py <stressor> with probes.bt, extractors, and wakeupTracker.bt
+  • featureExtractor.py → anomalyDetection.py → analyzeCausalGraphs.py as a batch chain, if all expected data/* inputs exist
+
+  Blockers / bugs that prevent “works as intended”
+
+  ┌──────────────────────────────────────────────────────────────────────┬───────────────────────────────────────────┐
+  │ Issue                                                                │ Impact                                    │
+  ├──────────────────────────────────────────────────────────────────────┼───────────────────────────────────────────┤
+  │ Doc says bare parentProcess.py is default; code requires sys.argv[1] │ Immediate crash                           │
+  ├──────────────────────────────────────────────────────────────────────┼───────────────────────────────────────────┤
+  │ autoExtractor.sh never uses sudo                                     │ bpftrace collection fails                 │
+  ├──────────────────────────────────────────────────────────────────────┼───────────────────────────────────────────┤
+  │ featureExtractor.py requires all stressor run files                  │ Partial datasets crash                    │
+  ├──────────────────────────────────────────────────────────────────────┼───────────────────────────────────────────┤
+  │ Ctrl+C path kills only the stressor, then wait()s on extractors      │ Can hang                                  │
+  ├──────────────────────────────────────────────────────────────────────┼───────────────────────────────────────────┤
+  │ Never wait()s on wakeupTracker (proc4); waits proc3 twice            │ Messy shutdown / possible truncated edges │
+  ├──────────────────────────────────────────────────────────────────────┼───────────────────────────────────────────┤
+  │ dependancies.txt omits pandas (used by 3 scripts)                    │ Incomplete setup                          │
+  ├──────────────────────────────────────────────────────────────────────┼───────────────────────────────────────────┤
+  │ No RAG / no background mode                                          │ Product goal unfinished                   │
+  ├──────────────────────────────────────────────────────────────────────┼───────────────────────────────────────────┤
+  │ Your own changes.md: probe timestamps + IF training still need work  │ Detection quality questionable            │
+  └──────────────────────────────────────────────────────────────────────┴───────────────────────────────────────────┘
+
+  Bottom line
+
+  Treat the current tree as a partial prototype: stressor collection + offline anomaly/graph analysis can run under sudo with a
+  full dataset, but it does not yet deliver a background Root Cause Analyser that explains the problem to the user.

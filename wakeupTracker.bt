@@ -1,0 +1,34 @@
+#!/usr/bin/env bpftrace
+/*
+ * wakeupTracker.bt
+ *
+ * Tracks kernel scheduler wakeup edges for causal-graph construction.
+ * Each sched_wakeup / sched_wakeup_new event emits one JSONL record:
+ *
+ *   {
+ *     "timestamp": <nsecs since boot>,
+ *     "waker_tid": <tid of current (waking) task>,
+ *     "waker_pid": <pid of current (waking) task>,
+ *     "waker_comm": "<comm of waker>",
+ *     "wakee_tid":  <tid of task being woken>,
+ *     "wakee_comm": "<comm of wakee>"
+ *   }
+ *
+ * Direction used later (analyzeCausalGraphs.py):
+ *   Wakee -> Waker  (wakee was blocked waiting on / unblocked by waker)
+ *
+ * Run (usually via parentProcess.py):
+ *   sudo stdbuf -oL bpftrace wakeupTracker.bt >> data/edges.jsonl
+ */
+
+tracepoint:sched:sched_wakeup,
+tracepoint:sched:sched_wakeup_new
+{
+	printf("{\"timestamp\": %llu, \"waker_tid\": %d, \"waker_pid\": %d, \"waker_comm\": \"%s\", \"wakee_tid\": %d, \"wakee_comm\": \"%s\"}\n",
+		nsecs,
+		tid,
+		pid,
+		comm,
+		args.pid,
+		args.comm);
+}

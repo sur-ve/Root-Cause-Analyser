@@ -1,0 +1,9 @@
+next/
+notes/
+practiseScripts/
+rps/
+__pycache__/
+.venv/
+*.pyc
+data/
+*.joblib
