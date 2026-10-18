@@ -267,6 +267,34 @@ sudo python3 parentProcess.py default
 ls -la data/edges_default.jsonl data/ground_truth.jsonl
 ```
 
+### 2026-10-18 (later 2) — sudo smoke test passed; Phase 2 started
+
+- [x] Preflight + `parentProcess.py default` validated under sudo:
+      `data/edges_default.jsonl` = 1.6 MB for a 70 s idle run; ground truth
+      written (`label=Normal`).
+- The old stressor corpus was cleaned during the storage work; `data/` now
+  holds only the new `default` run — the fault matrix will be recollected with
+  the new testbed scripts (also removes mixed-era label noise).
+- [x] 2.2 label hygiene: `featureExtractor.label_for_run_id()` is meta-first
+      with an `Unlabeled` fallback — no more `Custom (...)` labels.
+- [x] 2.3 persisted detector: `anomalyDetection.py --train` / `--score`,
+      artifact `data/model/ocsvm.joblib` (scaler + model + feature list +
+      training metadata); `--score` auto-trains when no artifact exists.
+      One baseline yields 5120 Normal rows; self-scored FPR 6.8 %.
+- [x] ragExplainer: ground-truth labels removed from retrieval and
+      classification (evaluation-only). Verified with a synthetic window whose
+      `labeled_causes` said 'OOM Kill' while metrics said I/O — report follows
+      the metrics.
+- [x] 4.1–4.3 (early): `testbed/run_fault.sh` (guards + post-run verification,
+      cgroup-wrapped memory stressors incl. a host-safe memStressor2) and
+      `testbed/run_all.sh` (least→most destructive, resume). Dry-run tested.
+- Full local pipeline on the baseline run (feature → detect → graph → report)
+  finishes in ~6 s; graph has 410 edges / 236 nodes from the sampled tracker.
+
+Baseline runs `default1..default5` in progress → then `testbed/run_all.sh`,
+retrain, re-run `detectorBenchmark.py` / `overallBenchmark.py` (2.5), update
+README numbers (2.6).
+
 Next: Phase 2 — collect `default` baselines, persist the OneClassSVM
 (`--train` / `--score`), fix label hygiene, re-run benchmarks.
 
