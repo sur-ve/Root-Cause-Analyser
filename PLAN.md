@@ -238,6 +238,15 @@ Unit-tested without root: `WindowAccumulator` (aggregation + boundary chaining),
 `ProbeStreamParser` (markers + legacy fallback), analyzer aggregated path and legacy path
 (synthetic `edgeData_*` / `edges.jsonl`).
 
+### 2026-10-18 (later) — bpftrace 0.20 compatibility fix
+
+The first preflight run failed: `wakeupAggregator.bt:39: syntax error, unexpected for`.
+Reason: `for` loops do not exist in bpftrace **0.20.2** (the installed version);
+`next/bpftraceReference.md` documents a newer release. Rewritten to use
+`print(@edges)` with `-f json` (same proven mechanism as `probes.bt`) and a
+single concatenated string key `"<wakee>|<waker>"`. `wakeupExtractor.py` now
+parses the JSON envelope; local unit tests pass. Re-run preflight to verify.
+
 Pending sudo smoke test (bpftrace cannot run as a normal user):
 
 ```bash

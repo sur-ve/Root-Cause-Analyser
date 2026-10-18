@@ -132,11 +132,7 @@ check_script() {
 
 for s in probes.bt wakeupAggregator.bt; do
     if [ -f "$s" ]; then
-        if [ "$s" = "probes.bt" ]; then
-            check_script "$s" "BEGIN_NS"
-        else
-            check_script "$s" '"marker"'
-        fi
+        check_script "$s" "BEGIN_NS"
     else
         bad "missing script: $s"
     fi

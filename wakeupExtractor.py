@@ -2,8 +2,8 @@
 """
 wakeupExtractor.py — windowed wakeup-edge collection for the RCA pipeline.
 
-Runs `bpftrace wakeupAggregator.bt` and converts its per-3s window dumps into
-compact JSONL records (one per window):
+Runs `bpftrace -q -f json wakeupAggregator.bt` and converts its per-3s window
+dumps into compact JSONL records (one per window):
 
     {"window_start": <epoch>, "window_end": <epoch>,
      "edges": [["wakee_comm", "waker_comm", <count>], ...]}
@@ -40,8 +40,23 @@ def load_boot_epoch(run_id: str) -> float:
         return time.time() - time.monotonic()
 
 
+def extract_ns_marker(rec: dict, prefix: str):
+    """Read 'PREFIX <nsecs>' markers emitted via printf in bpftrace JSON mode.
+
+    printf output is wrapped (e.g. {"type": "printf", "data": "..."}), so look
+    for the prefix in any string field.
+    """
+    for value in rec.values():
+        if isinstance(value, str) and value.startswith(prefix):
+            try:
+                return int(value[len(prefix):].strip())
+            except ValueError:
+                return None
+    return None
+
+
 class WindowAccumulator:
-    """Turns the aggregator's line protocol into epoch-stamped window records.
+    """Turns wakeupAggregator's JSON lines into epoch-stamped window records.
 
     Kept importable and side-effect free so it can be unit-tested without root.
     """
@@ -70,22 +85,52 @@ class WindowAccumulator:
         if not isinstance(rec, dict):
             return False
 
-        marker = rec.get('marker')
-        if marker == 'begin':
-            self.begin_ns = rec.get('nsecs')
-            return False
-        if marker == 'window_end':
-            self.end_ns = rec.get('nsecs')
-            return False
-        if marker == 'window_done':
+        if rec.get('data') == 'END':
             return self._flush()
-        if 'wakee' in rec and 'waker' in rec:
-            try:
-                key = (str(rec['wakee']), str(rec['waker']))
-                self.edges[key] = self.edges.get(key, 0) + int(rec.get('count', 1))
-            except (TypeError, ValueError):
-                pass
+
+        ns = extract_ns_marker(rec, 'WINDOW_END_NS ')
+        if ns is not None:
+            self.end_ns = ns
+            return False
+        ns = extract_ns_marker(rec, 'BEGIN_NS ')
+        if ns is not None:
+            self.begin_ns = ns
+            return False
+
+        if rec.get('type') == 'map':
+            data = rec.get('data')
+            if isinstance(data, dict):
+                self._add_edges(data.get('@edges'))
         return False
+
+    def _add_edges(self, edges_map):
+        """Accept the dict shape {"wakee|waker": count} (and list shapes defensively)."""
+        if isinstance(edges_map, dict):
+            for key, value in edges_map.items():
+                self._add_edge(str(key), value)
+        elif isinstance(edges_map, list):
+            for entry in edges_map:
+                if not isinstance(entry, dict):
+                    continue
+                key = entry.get('key')
+                if isinstance(key, list) and len(key) == 2:
+                    self._add_pair(str(key[0]), str(key[1]), entry.get('value'))
+                elif isinstance(key, str):
+                    self._add_edge(key, entry.get('value'))
+
+    def _add_edge(self, key: str, value):
+        if '|' not in key:
+            return
+        wakee, waker = key.split('|', 1)
+        self._add_pair(wakee, waker, value)
+
+    def _add_pair(self, wakee: str, waker: str, value):
+        try:
+            count = int(value)
+        except (TypeError, ValueError):
+            return
+        pair = (wakee, waker)
+        self.edges[pair] = self.edges.get(pair, 0) + count
 
     def _flush(self) -> bool:
         wrote = False
@@ -116,7 +161,7 @@ def main():
 
     # stdbuf -oL keeps bpftrace's stdout line-buffered through the pipe
     proc = subprocess.Popen(
-        ['stdbuf', '-oL', 'bpftrace', '-q', BPF_SCRIPT],
+        ['stdbuf', '-oL', 'bpftrace', '-q', '-f', 'json', BPF_SCRIPT],
         stdout=subprocess.PIPE,
         text=True,
     )
