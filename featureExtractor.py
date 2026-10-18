@@ -6,6 +6,22 @@ import pandas as pd
 
 from labels import ROOT_CAUSES
 
+
+def label_for_run_id(run_id: str) -> str:
+    """Meta-first label lookup; unknown runs become 'Unlabeled' (never 'Custom (...)).
+
+    Ground-truth labels are used for evaluation/training only — the production
+    explainer must not read them (see PLAN.md phase 2).
+    """
+    try:
+        with open(f'data/meta_{run_id}.json', 'r') as f:
+            label = json.load(f).get('label')
+        if label:
+            return label
+    except Exception:
+        pass
+    return ROOT_CAUSES.get(run_id, 'Unlabeled')
+
 def load_jsonl(path: str):
     records = []
     if not os.path.exists(path) or os.path.getsize(path) == 0:
@@ -81,7 +97,7 @@ def merge_pair(run_id: str):
     )
 
     combined_df['run_id'] = run_id
-    combined_df['root_cause'] = ROOT_CAUSES.get(run_id, f'Custom ({run_id})')
+    combined_df['root_cause'] = label_for_run_id(run_id)
     print(f"[+] Processed {run_id}: {len(combined_df)} records labeled as '{combined_df['root_cause'].iloc[0]}'")
     return combined_df
 

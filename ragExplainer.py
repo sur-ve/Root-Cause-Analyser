@@ -125,42 +125,13 @@ def query_online_llm(prompt: str) -> Optional[str]:
         print(f"[!] Online LLM call failed ({type(e).__name__}: {e}) — using grounded template only.")
         return None
 
-LABEL_TO_DOC_ID = {
-    'CPU Competition':            'cpu_competition',
-    'Process Throttled':          'cgroup_throttling',
-    'Baseline CPU Usage':         'cpu_competition',
-    'Memory Swapping':            'memory_pressure',
-    'OOM Kill':                   'oom',
-    'Continuous Heap Expansion':  'heap_expansion',
-    'Userspace Contention':       'lock_contention',
-    'Kernel-Internal Contention': 'lock_contention',
-    'Small Random Writes':        'io_saturation',
-    'Large Sequential Writes':    'io_saturation',
-}
-
-LABEL_TO_CAUSE = {
-    'CPU Competition':            'CPU Competition / Scheduling Starvation',
-    'Process Throttled':          'CPU Quota Throttling (cgroup)',
-    'Baseline CPU Usage':         'Moderate CPU Load',
-    'Memory Swapping':            'Memory Pressure & Swapping',
-    'OOM Kill':                   'OOM Kill (Memory Exhaustion)',
-    'Continuous Heap Expansion':  'Continuous Heap Expansion (brk)',
-    'Userspace Contention':       'Userspace Lock Contention (Futex)',
-    'Kernel-Internal Contention': 'Kernel VFS / Lock Contention',
-    'Small Random Writes':        'Disk I/O Saturation (Random Writes)',
-    'Large Sequential Writes':    'Disk I/O Saturation (Sequential Writes)',
-}
-
 def build_retrieval_query(window: Dict[str, Any]) -> str:
-    tokens = []
+    """Keyword query for TF-IDF retrieval.
 
-    # Labeled causes are the strongest semantic signal — weight them first
-    for cause in window.get('labeled_causes', []):
-        doc_key = LABEL_TO_DOC_ID.get(cause, '')
-        if doc_key:
-            tokens.extend([cause, doc_key.replace('_', ' ')])
-        else:
-            tokens.append(cause)
+    Ground-truth labels (`labeled_causes`) are intentionally ignored — they are
+    for evaluation only, never for the production diagnosis path.
+    """
+    tokens = []
 
     # Candidate root process names
     for r in window.get('candidate_roots', [])[:3]:
@@ -171,21 +142,20 @@ def build_retrieval_query(window: Dict[str, Any]) -> str:
     for p in window.get('sample_paths', [])[:2]:
         tokens.append(p.replace('->', ' '))
 
-    # Supplement with metric-derived keywords only when labels are absent
+    # Metric-derived keywords
     top_metrics = window.get('top_metrics', {})
-    if not window.get('labeled_causes'):
-        if top_metrics.get('oom_kill_count', 0) > 0:
-            tokens.extend(['oom', 'out of memory', 'kill', 'memory exhaustion'])
-        elif top_metrics.get('swap_in_count', 0) > 100 or top_metrics.get('swap_out_count', 0) > 100:
-            tokens.extend(['memory pressure', 'swapping', 'thrashing', 'allocstall'])
-        elif top_metrics.get('sector_count', 0) > 5000 or top_metrics.get('iowait_time', 0) > 0:
-            tokens.extend(['io saturation', 'disk writes', 'iowait', 'storage'])
-        elif top_metrics.get('futex_wait_count', 0) > 500:
-            tokens.extend(['futex', 'lock', 'userspace contention'])
-        elif top_metrics.get('locktime', 0) > 1e6:
-            tokens.extend(['lock', 'kernel contention', 'dentry', 'vfs'])
-        else:
-            tokens.extend(['cpu competition', 'runqueue wait', 'scheduling'])
+    if top_metrics.get('oom_kill_count', 0) > 0:
+        tokens.extend(['oom', 'out of memory', 'kill', 'memory exhaustion'])
+    elif top_metrics.get('swap_in_count', 0) > 100 or top_metrics.get('swap_out_count', 0) > 100:
+        tokens.extend(['memory pressure', 'swapping', 'thrashing', 'allocstall'])
+    elif top_metrics.get('sector_count', 0) > 5000 or top_metrics.get('iowait_time', 0) > 0:
+        tokens.extend(['io saturation', 'disk writes', 'iowait', 'storage'])
+    elif top_metrics.get('futex_wait_count', 0) > 500:
+        tokens.extend(['futex', 'lock', 'userspace contention'])
+    elif top_metrics.get('locktime', 0) > 1e6:
+        tokens.extend(['lock', 'kernel contention', 'dentry', 'vfs'])
+    else:
+        tokens.extend(['cpu competition', 'runqueue wait', 'scheduling'])
 
     return " ".join(tokens)
 
@@ -196,17 +166,13 @@ def synthesize_grounded_report(window: Dict[str, Any], retrieved_docs: List[Dict
     culprit_comm = top_root.split(':')[0]
     sample_paths = window.get('sample_paths', [])
     metrics = window.get('top_metrics', {})
-    labeled = window.get('labeled_causes', [])
 
     evidence_points = []
     remediation = "Investigate system logs and process resource limits."
 
-    # --- Classification: labeled_causes first (ground-truth from stressor), then metric heuristics ---
-    if labeled:
-        primary_label = labeled[0]
-        classified_cause = LABEL_TO_CAUSE.get(primary_label, primary_label)
-        # Optionally prefer retrieved doc remediation
-    elif metrics.get('oom_kill_count', 0) > 0:
+    # --- Classification from observed evidence only (metrics + retrieved runbooks).
+    #     Ground-truth labels are for evaluation and are deliberately not used. ---
+    if metrics.get('oom_kill_count', 0) > 0:
         classified_cause = "OOM Kill (Memory Exhaustion)"
     elif metrics.get('swap_in_count', 0) > 100 or metrics.get('swap_out_count', 0) > 100:
         classified_cause = "Memory Pressure & Swapping"

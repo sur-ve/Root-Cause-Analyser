@@ -23,6 +23,11 @@ ROOT_CAUSES = {
     'default': 'Normal',
 }
 
+# Repeated baseline runs use indexed run_ids (default1, default2, ...) so their
+# per-run files don't overwrite each other; every one of them means 'Normal'.
+for _i in range(1, 9):
+    ROOT_CAUSES.setdefault(f'default{_i}', 'Normal')
+
 # Coarse cause families used by the evaluation table (testbed/evaluate.py)
 FAULT_FAMILIES = {
     'Normal': 'normal',
