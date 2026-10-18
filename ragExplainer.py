@@ -9,6 +9,8 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from typing import List, Dict, Any, Optional
 
+import diagnosis
+
 KNOWLEDGE_DIR = 'knowledge'
 CAUSAL_SUMMARIES_FILE = 'data/causal_summaries.json'
 SCORED_FEATURES_FILE = 'data/scored_features.csv'
@@ -142,22 +144,26 @@ def build_retrieval_query(window: Dict[str, Any]) -> str:
     for p in window.get('sample_paths', [])[:2]:
         tokens.append(p.replace('->', ' '))
 
-    # Metric-derived keywords
-    top_metrics = window.get('top_metrics', {})
-    if top_metrics.get('oom_kill_count', 0) > 0:
-        tokens.extend(['oom', 'out of memory', 'kill', 'memory exhaustion'])
-    elif top_metrics.get('swap_in_count', 0) > 100 or top_metrics.get('swap_out_count', 0) > 100:
-        tokens.extend(['memory pressure', 'swapping', 'thrashing', 'allocstall'])
-    elif top_metrics.get('sector_count', 0) > 5000 or top_metrics.get('iowait_time', 0) > 0:
-        tokens.extend(['io saturation', 'disk writes', 'iowait', 'storage'])
-    elif top_metrics.get('futex_wait_count', 0) > 500:
-        tokens.extend(['futex', 'lock', 'userspace contention'])
-    elif top_metrics.get('locktime', 0) > 1e6:
-        tokens.extend(['lock', 'kernel contention', 'dentry', 'vfs'])
-    else:
-        tokens.extend(['cpu competition', 'runqueue wait', 'scheduling'])
+    # Metric-derived keywords from the shared label-free classifier
+    diag = diagnosis.classify_cause(
+        window.get('top_metrics', {}),
+        culprit_comms=window.get('top_processes', []),
+    )
+    tokens.extend(QUERY_TOKENS.get(diag['family'], []))
 
     return " ".join(tokens)
+
+
+# TF-IDF query tokens per diagnosed cause family (see diagnosis.classify_cause)
+QUERY_TOKENS = {
+    'cpu': ['cpu competition', 'runqueue wait', 'scheduling', 'cpu throttling', 'quota'],
+    'memory': ['memory pressure', 'swapping', 'thrashing', 'allocstall'],
+    'heap': ['heap expansion', 'brk', 'anonymous memory growth', 'major faults'],
+    'io': ['io saturation', 'disk writes', 'iowait', 'storage'],
+    'lock': ['futex', 'lock', 'kernel contention', 'dentry', 'vfs'],
+    'oom': ['oom', 'out of memory', 'kill', 'memory exhaustion'],
+    'unknown': ['anomaly', 'contention'],
+}
 
 def synthesize_grounded_report(window: Dict[str, Any], retrieved_docs: List[Dict[str, Any]]) -> str:
     win_id = window.get('window_id', 'unknown')
@@ -170,30 +176,20 @@ def synthesize_grounded_report(window: Dict[str, Any], retrieved_docs: List[Dict
     evidence_points = []
     remediation = "Investigate system logs and process resource limits."
 
-    # --- Classification from observed evidence only (metrics + retrieved runbooks).
+    # --- Classification from observed evidence only (metrics + identified
+    #     culprit processes) via the shared label-free classifier.
     #     Ground-truth labels are for evaluation and are deliberately not used. ---
-    if metrics.get('oom_kill_count', 0) > 0:
-        classified_cause = "OOM Kill (Memory Exhaustion)"
-    elif metrics.get('swap_in_count', 0) > 100 or metrics.get('swap_out_count', 0) > 100:
-        classified_cause = "Memory Pressure & Swapping"
-    elif metrics.get('sector_count', 0) > 5000 and not metrics.get('iowait_time'):
-        classified_cause = "Disk I/O Saturation (Sequential Writes)"
-    elif metrics.get('iowait_time', 0) > 0:
-        classified_cause = "Disk I/O Saturation (Random Writes)"
-    elif metrics.get('futex_wait_count', 0) > 1000:
-        classified_cause = "Userspace Lock Contention (Futex)"
-    elif metrics.get('locktime', 0) > 1e6:
-        classified_cause = "Kernel VFS / Lock Contention"
-    elif metrics.get('cpu_some_avg10', 0) > 50:
-        classified_cause = "CPU Competition / Starvation"
-    elif retrieved_docs:
-        classified_cause = retrieved_docs[0]['id'].replace('_', ' ').title()
-    else:
-        classified_cause = "System Anomaly (Unclassified)"
+    diag = diagnosis.classify_cause(metrics, culprit_comms=window.get('top_processes', []))
+    classified_cause = diag['cause']
 
     # --- Collect metric evidence (all relevant, regardless of classification) ---
     if metrics.get('oom_kill_count', 0) > 0:
         evidence_points.append(f"Kernel vmstat reported {int(metrics['oom_kill_count'])} OOM kills.")
+        remediation = "Set strict memory limits via cgroups (`memory.max`) and profile process memory consumption."
+    if metrics.get('oom_kills', 0) > 0:
+        evidence_points.append(
+            f"Kernel OOM-kill event(s) observed ({int(metrics['oom_kills'])} tracepoint hit(s))."
+        )
         remediation = "Set strict memory limits via cgroups (`memory.max`) and profile process memory consumption."
     if metrics.get('swap_in_count', 0) > 0 or metrics.get('swap_out_count', 0) > 0:
         evidence_points.append(
@@ -219,6 +215,9 @@ def synthesize_grounded_report(window: Dict[str, Any], retrieved_docs: List[Dict
         evidence_points.append(f"PSI I/O pressure avg10 = {metrics['io_some_avg10']}%.")
     if metrics.get('runtime', 0) > 0:
         evidence_points.append(f"Peak task scheduled runtime: {metrics['runtime']:.0f} ns.")
+
+    # Classification evidence trail (which signals fired, in which tier)
+    evidence_points.append(f"Classification basis: {diag['basis']}.")
 
     # --- Graph evidence ---
     if roots:

@@ -125,14 +125,16 @@ RCA/
 ├── probes.bt                 # Latency / lock / IO / OOM bpftrace maps
 ├── wakeupTracker.bt          # sched_wakeup → edges_<run_id>.jsonl (1-in-100 sampled)
 ├── featureExtractor.py       # Merge + label features (auto-discovers runs)
+├── diagnosis.py              # Shared label-free cause classification (explainer + benchmarks)
 ├── anomalyDetection.py       # Production OneClassSVM scorer
 ├── detectorBenchmark.py      # OCSVM vs IsolationForest vs LOF
-├── overallBenchmark.py       # Hold-out accuracy (TP/TN/FP/FN)
+├── overallBenchmark.py       # Hold-out accuracy (TP/TN/FP/FN) + cause-family agreement
 ├── analyzeCausalGraphs.py    # NetworkX causal analysis + JSON export
 ├── ragExplainer.py           # TF-IDF RAG explainer + structured reports
 ├── run_pipeline.py           # One-command offline pipeline runner
 ├── rcaDaemon.py              # Continuous background monitoring daemon
 ├── autoExtractor.sh          # Shell helper to collect all stressor classes
+├── testbed/                  # Evaluator testbed (preflight, fault runs, demo)
 ├── requirements.txt          # Python dependencies
 ├── preprocessing.md          # Preprocessing steps documentation
 ├── IMPLEMENTATION.md         # Step-by-step build guide
@@ -152,11 +154,13 @@ RCA/
     ├── meta_*.json
     ├── combined_features.csv
     ├── scored_features.csv
+    ├── model/ocsvm.joblib     # Persisted scaler + model + feature list
     ├── causal_summaries.json
     ├── causal_graphs.json
     ├── rca_report.txt / .json
     ├── detector_benchmark.json
-    └── overall_benchmark.json
+    ├── overall_benchmark.json
+    └── ground_truth.jsonl     # Per-run labels + stressor start/end (evaluation only)
 ```
 
 ---
@@ -256,13 +260,13 @@ On `sched_wakeup` / `sched_wakeup_new`, emits JSONL:
 
 Outputs columns `anomaly_score` (decision function; negative ≈ anomaly) and `predicted_anomaly` (True when `predict == -1`). Writes `data/scored_features.csv` and prints per-class flagged rates / Normal FPR.
 
-**Why OneClassSVM?** `detectorBenchmark.py` on the labeled stressor set showed:
+**Why OneClassSVM?** `detectorBenchmark.py` on the labeled stressor set showed (current corpus, 69 682 rows):
 
 | Model | F1 | FPR (Normal) | Notes |
 |---|---|---|---|
-| **OneClassSVM** | **~0.997** | **~5%** | Selected for production |
-| LocalOutlierFactor | ~0.973 | ~53% | Perfect recall, too many FPs |
-| IsolationForest | ~0.878 | ~20% | Previous baseline |
+| **OneClassSVM** | **0.981** | **5.4 %** | Selected for production |
+| LocalOutlierFactor | 0.916 | 26.1 % | Near-perfect recall, too many false positives |
+| IsolationForest | 0.826 | 8.8 % | Previous baseline |
 
 #### `detectorBenchmark.py`
 
@@ -278,7 +282,8 @@ Hold-out (default 30%, stratified) accuracy for the **production OneClassSVM** p
 
 - TP / TN / FP / FN, accuracy, precision, recall, F1, FPR, FNR
 - Per-class flag rates on the test split
-- Metric-heuristic cause-family accuracy (explainer path without label peek)
+- Label-free cause-family agreement at window level (shared with the explainer via
+  `diagnosis.py`), split into windows overlapping the fault interval vs transition windows
 - Full-data production-style score for reference
 
 Writes `data/overall_benchmark.json`.
@@ -305,8 +310,10 @@ python3 overallBenchmark.py --test-size 0.3 --nu 0.05
 #### `ragExplainer.py`
 
 - Indexes `knowledge/*.md` with `TfidfVectorizer(stop_words='english')`.
-- Builds a retrieval query from labeled causes, candidate roots, paths, and (if unlabeled) metric keywords.
-- Classifies cause: labeled stressor → metric heuristics → retrieved doc title.
+- Builds a retrieval query from candidate roots, causal paths, and diagnosis-family keywords.
+- Classifies cause via `diagnosis.py` (shared with the benchmarks; observed evidence only):
+  culprit-process identity → kernel OOM-kill event → metric signatures → `unknown`.
+  Ground-truth labels are never used.
 - Collects evidence (OOM, swap, PSI, lock, I/O, graph) and remediation from runbooks.
 - Optional online LLM review via any OpenAI-compatible API: set `RCA_LLM_API_KEY` (plus optional `RCA_LLM_BASE_URL`, `RCA_LLM_MODEL`); no local install, template report is the fallback.
 - Writes `data/rca_report.txt` and `data/rca_report.json`.
@@ -464,10 +471,10 @@ Use stressors as ground truth:
 
 | Check | Expectation |
 |---|---|
-| Normal FPR | Low (OneClassSVM ~5% on current corpus) |
-| Stressor recall | High across fault classes |
-| Graph candidates | Often include stress-ng / fio related `comm` |
-| RAG text | Names correct cause family more often than chance |
+| Normal FPR | Low (OneClassSVM 5.4 % on the current corpus) |
+| Stressor recall | 10/10 fault classes ≈ 1.0 (held-out test) |
+| Graph candidates | Often include stressor-related `comm` (e.g. `stress-ng-*`, `fio`) |
+| Cause family (reports) | 99.4 % over fault-active windows; 88.0 % incl. transition windows |
 
 Re-run `detectorBenchmark.py` / `overallBenchmark.py` after changing features or detector hyperparameters.
 
@@ -479,9 +486,14 @@ From `detectorBenchmark.py` / production-style full-data scoring (re-run after d
 
 | Detector | Accuracy | F1 | FPR | Role |
 |---|---|---|---|---|
-| **OneClassSVM** | ~0.995 | ~0.997 | ~0.05 | **Production** |
-| LocalOutlierFactor | ~0.949 | ~0.973 | ~0.53 | Comparison |
-| IsolationForest | ~0.799 | ~0.878 | ~0.20 | Prior baseline |
+| **OneClassSVM** | 0.977 | 0.981 | 5.4 % | **Production** |
+| LocalOutlierFactor | 0.892 | 0.916 | 26.1 % | Comparison |
+| IsolationForest | 0.815 | 0.826 | 8.8 % | Prior baseline |
+
+Held-out (`overallBenchmark.py`, 30 % test): OCSVM F1 0.979, FPR 5.8 %,
+per-class recall 1.0 for 9/10 fault classes and 0.99 for the 10th.
+Label-free cause-family agreement: **99.4 %** over fault-active windows
+(159/191; the rest are transition windows without fault activity).
 
 Hold-out numbers (and TP/TN/FP/FN) are written to `data/overall_benchmark.json` when you run `overallBenchmark.py`.
 
@@ -490,7 +502,9 @@ Hold-out numbers (and TP/TN/FP/FN) are written to `data/overall_benchmark.json` 
 ## Safety Notes
 
 - Stressors can make the machine slow, swap heavily, or trigger OOM. Prefer a VM or spare host.
-- `memStressor2` is aggressive; accept OOM risk before running it.
+- The testbed runs memory stressors inside `systemd-run --scope` cgroups
+  (`MemoryMax`/`MemorySwapMax`); `memStressor2` gets OOM-killed *inside its cgroup*
+  (repeatedly, by design) and cannot take the host down.
 - bpftrace and `/proc` collectors need elevated privileges.
 - Do not point `fio` stressors at production disks without understanding write paths.
 - `rcaDaemon.py` needs root (or CAP_BPF / CAP_SYS_ADMIN) for live collection; run in an isolated environment.
@@ -501,7 +515,7 @@ Hold-out numbers (and TP/TN/FP/FN) are written to `data/overall_benchmark.json` 
 
 See `changes.md`:
 
-- Collect more / cleaner `default` baselines for a tighter Normal boundary
+- Recollect `memStressor2` with the new OOM-kill probes (`oom_kills` metric) and re-verify the OOM path
 - Stronger filtering of noisy kernel wakeups (IRQ threads, kworkers)
 - Optional upgrade from TF-IDF to dense embeddings (would need an embedding model or API)
 - Tune OneClassSVM `nu` if Normal FPR drifts after new data collection

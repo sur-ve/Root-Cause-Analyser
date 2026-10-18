@@ -30,7 +30,6 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import (
     accuracy_score,
-    classification_report,
     confusion_matrix,
     f1_score,
     precision_score,
@@ -40,35 +39,35 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import OneClassSVM
 
+import diagnosis
+from labels import FAULT_FAMILIES as LABEL_TO_FAMILY
+
 NON_FEATURE_COLS = {'window_start', 'window_end', 'timestamp', 'comm', 'root_cause', 'run_id'}
 NORMAL_LABEL = 'Normal'
 RANDOM_STATE = 42
 OCSVM_NU = 0.05
 MAX_TRAIN_SAMPLES = 3000
 
-# Maps ground-truth stressor labels → coarse cause families used by heuristics
-LABEL_TO_FAMILY = {
-    'CPU Competition': 'cpu',
-    'Process Throttled': 'cpu',
-    'Baseline CPU Usage': 'cpu',
-    'Memory Swapping': 'memory',
-    'OOM Kill': 'oom',
-    'Continuous Heap Expansion': 'heap',
-    'Userspace Contention': 'lock',
-    'Kernel-Internal Contention': 'lock',
-    'Small Random Writes': 'io',
-    'Large Sequential Writes': 'io',
-}
+FAMILY_NAMES = diagnosis.FAMILY_NAMES
 
-FAMILY_NAMES = {
-    'cpu': 'CPU / Scheduling',
-    'memory': 'Memory Pressure',
-    'oom': 'OOM',
-    'heap': 'Heap Expansion',
-    'lock': 'Lock Contention',
-    'io': 'I/O Saturation',
-    'unknown': 'Unknown',
-}
+
+def load_fault_intervals(path: str = 'data/ground_truth.jsonl') -> Dict[str, Tuple[float, float]]:
+    """run_id -> (stressor_start, stressor_end) from ground truth metadata."""
+    intervals: Dict[str, Tuple[float, float]] = {}
+    if not os.path.exists(path):
+        return intervals
+    try:
+        with open(path) as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                d = json.loads(line)
+                start, end = d.get('stressor_start_time'), d.get('stressor_end_time')
+                if start is not None and end is not None:
+                    intervals[str(d['run_id'])] = (float(start), float(end))
+    except Exception:
+        return {}
+    return intervals
 
 
 def parse_args() -> argparse.Namespace:
@@ -104,70 +103,76 @@ def detection_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, Any]:
     }
 
 
-def classify_family_from_metrics(row: pd.Series) -> str:
-    """Mirror ragExplainer metric heuristics without using labeled_causes."""
-    oom = float(row.get('oom_kill_count', 0) or 0)
-    swap_in = float(row.get('swap_in_count', 0) or 0)
-    swap_out = float(row.get('swap_out_count', 0) or 0)
-    sectors = float(row.get('sector_count', 0) or 0)
-    iowait = float(row.get('iowait_time', 0) or 0)
-    futex = float(row.get('futex_wait_count', 0) or 0)
-    locktime = float(row.get('locktime', 0) or 0)
-    cpu_psi = float(row.get('cpu_some_avg10', 0) or 0)
-    oom_time = float(row.get('oom_time', 0) or 0)
+def evaluate_cause_heuristics(df: pd.DataFrame,
+                              fault_intervals: Dict[str, Tuple[float, float]] | None = None) -> Dict[str, Any]:
+    """Window-level family agreement of the label-free classifier (diagnosis.py).
 
-    if oom > 0 or oom_time > 0:
-        return 'oom'
-    if swap_in > 100 or swap_out > 100:
-        return 'memory'
-    if sectors > 5000:
-        return 'io'
-    if iowait > 0:
-        return 'io'
-    if futex > 1000:
-        return 'lock'
-    if locktime > 1e6:
-        return 'lock'
-    if cpu_psi > 50:
-        return 'cpu'
-    # Mild heap signal: high runtime alone is weak; leave unknown if nothing fires
-    return 'unknown'
-
-
-def evaluate_cause_heuristics(df: pd.DataFrame) -> Dict[str, Any]:
-    """On non-Normal rows, compare heuristic family vs labeled family."""
-    faults = df[df['root_cause'] != NORMAL_LABEL].copy()
+    Windows are annotated from observed data only: the same window-level metrics
+    and top CPU-consumer comms the explainer path uses. Windows that do not
+    overlap the ground-truth fault interval contain no fault evidence and are
+    reported separately as transition windows (they are not diagnosis failures).
+    """
+    fault_intervals = fault_intervals or {}
+    faults = df[df['root_cause'] != NORMAL_LABEL]
     if faults.empty:
-        return {'n': 0, 'accuracy': 0.0, 'by_family': {}}
+        return {'n_windows': 0, 'n_active_windows': 0, 'accuracy': 0.0,
+                'accuracy_active': 0.0, 'by_family': {}, 'by_family_active': {}}
 
-    y_true = faults['root_cause'].map(LABEL_TO_FAMILY).fillna('unknown')
-    y_pred = faults.apply(classify_family_from_metrics, axis=1)
+    records: List[Dict[str, Any]] = []
+    for (run_id, ws), rows in faults.groupby(['run_id', 'window_start']):
+        label = rows['root_cause'].value_counts().index[0]
+        diag = diagnosis.classify_cause(
+            diagnosis.aggregate_window_metrics(rows),
+            diagnosis.top_process_comms(rows),
+        )
+        win_end = float(rows['window_end'].max()) if 'window_end' in rows.columns else float(ws) + 3.0
+        records.append({
+            'run_id': str(run_id),
+            'window_start': float(ws),
+            'label': label,
+            'true_family': LABEL_TO_FAMILY.get(label, 'unknown'),
+            'pred_family': diag['family'],
+            'basis': diag['basis'],
+            'active': _window_overlaps_interval(float(ws), win_end, fault_intervals.get(str(run_id))),
+        })
 
-    # Treat 'unknown' predictions as misses
-    correct = (y_true == y_pred) & (y_pred != 'unknown')
-    # Also count unknown→unknown only if label truly unknown (rare)
-    acc = float(correct.mean()) if len(faults) else 0.0
+    w = pd.DataFrame(records)
 
-    by_family: Dict[str, Dict[str, Any]] = {}
-    for fam in sorted(set(y_true.unique()) | set(y_pred.unique())):
-        mask = y_true == fam
-        if mask.sum() == 0:
-            continue
-        by_family[FAMILY_NAMES.get(fam, fam)] = {
-            'n': int(mask.sum()),
-            'recall': float((y_pred[mask] == fam).mean()),
-        }
+    def _summary(sub: pd.DataFrame) -> Tuple[float, Dict[str, Dict[str, Any]]]:
+        if sub.empty:
+            return 0.0, {}
+        acc = float((sub['true_family'] == sub['pred_family']).mean())
+        by_family: Dict[str, Dict[str, Any]] = {}
+        for fam, gdf in sub.groupby('true_family'):
+            by_family[FAMILY_NAMES.get(fam, fam)] = {
+                'n': int(len(gdf)),
+                'recall': float((gdf['pred_family'] == fam).mean()),
+                'preds': {str(k): int(v) for k, v in gdf['pred_family'].value_counts().items()},
+            }
+        return acc, by_family
 
-    report = classification_report(
-        y_true, y_pred, zero_division=0, output_dict=True
-    )
+    acc_all, by_all = _summary(w)
+    active = w[w['active']]
+    acc_active, by_active = _summary(active)
+
     return {
-        'n': int(len(faults)),
-        'accuracy': acc,
-        'strict_label_match_rate': float((y_true == y_pred).mean()),
-        'by_family': by_family,
-        'classification_report': report,
+        'n_windows': int(len(w)),
+        'n_active_windows': int(len(active)),
+        'accuracy': acc_all,
+        'accuracy_active': acc_active,
+        'by_family': by_all,
+        'by_family_active': by_active,
+        'windows': records,
     }
+
+
+def _window_overlaps_interval(start: float, end: float, interval: Tuple[float, float] | None) -> bool:
+    """True when >= 50% of the window lies inside the fault interval."""
+    if interval is None:
+        return True  # no ground-truth interval for this run -> cannot mark transition
+    lo, hi = interval
+    overlap = max(0.0, min(end, hi) - max(start, lo))
+    return overlap >= 0.5 * max(end - start, 1e-9)
 
 
 def print_detection_report(split_name: str, m: Dict[str, Any], elapsed: float) -> None:
@@ -266,14 +271,16 @@ def main() -> None:
         kind = 'FP rate' if cause == NORMAL_LABEL else 'recall'
         print(f"  {cause:<32} n={n:<5} {kind}={rate:.3f}")
 
-    # Cause-family heuristic accuracy on full data (explainer path)
-    cause_eval = evaluate_cause_heuristics(df)
-    print('\n--- Cause-family heuristic accuracy (explainer, no label peek) ---')
-    print(f"  Fault rows evaluated : {cause_eval['n']}")
-    print(f"  Family accuracy      : {cause_eval['accuracy']:.4f}")
-    print(f"  Strict match rate    : {cause_eval['strict_label_match_rate']:.4f}")
-    for fam, stats in cause_eval.get('by_family', {}).items():
-        print(f"    {fam:<22} n={stats['n']:<5} recall={stats['recall']:.3f}")
+    # Cause-family classification on the full data (label-free explainer path)
+    cause_eval = evaluate_cause_heuristics(df, load_fault_intervals())
+    print('\n--- Cause-family classification (label-free, window level) ---')
+    print(f"  Fault windows evaluated : {cause_eval['n_windows']} "
+          f"({cause_eval['n_active_windows']} overlapping the fault interval)")
+    print(f"  Family agreement (fault-active windows) : {cause_eval['accuracy_active']:.4f}")
+    print(f"  Family agreement (all fault windows)    : {cause_eval['accuracy']:.4f}")
+    for fam, stats in cause_eval.get('by_family_active', {}).items():
+        preds = ", ".join(f"{k}:{v}" for k, v in stats['preds'].items())
+        print(f"    {fam:<22} n={stats['n']:<4} recall={stats['recall']:.3f}  (preds: {preds})")
 
     # Full-data scores matching production anomalyDetection.py
     t1 = time.perf_counter()
@@ -305,9 +312,7 @@ def main() -> None:
         'detection_test': m_test,
         'detection_full': m_full,
         'per_class_test': per_class,
-        'cause_heuristics': {
-            k: v for k, v in cause_eval.items() if k != 'classification_report'
-        },
+        'cause_heuristics': cause_eval,
         'timing_s': {
             'holdout_fit_score': elapsed,
             'full_fit_score': full_elapsed,

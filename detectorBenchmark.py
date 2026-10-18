@@ -153,7 +153,7 @@ def build_models() -> List[Tuple[str, Any, bool, str]]:
             'IsolationForest',
             IsolationForest(contamination='auto', random_state=RANDOM_STATE, n_jobs=-1),
             False,
-            'Prior baseline. Tree ensemble; no scaling; higher FPR on Normal (~20%).',
+            'Prior baseline. Tree ensemble; no scaling; higher FPR on Normal than OCSVM.',
         ),
         (
             'LocalOutlierFactor',
@@ -164,7 +164,7 @@ def build_models() -> List[Tuple[str, Any, bool, str]]:
                 n_jobs=-1,
             ),
             True,
-            'Density / kNN novelty; perfect recall here but ~52% FPR on Normal.',
+            'Density / kNN novelty; near-perfect recall but an order-of-magnitude higher FPR on Normal.',
         ),
     ]
 

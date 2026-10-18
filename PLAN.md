@@ -298,3 +298,41 @@ README numbers (2.6).
 Next: Phase 2 — collect `default` baselines, persist the OneClassSVM
 (`--train` / `--score`), fix label hygiene, re-run benchmarks.
 
+### 2026-10-18 (later 3) — full corpus collected; detector + cause classification reworked
+
+- [x] 2.1 Corpus: 6 `default` baselines + 10-fault matrix collected via the
+      guarded testbed scripts (16 runs total, `data/combined_features.csv` =
+      69 682 rows, **28 789 Normal**). `memStressor2` produced only a 2 s blip:
+      the 2G/0-swap cgroup kill fired before any reclaim signal was visible
+      (see fix below).
+- [x] Detector retrained on all baselines: **Normal FPR 5.2 %**,
+      `detectorBenchmark.py` OCSVM F1 0.9811 / FPR 5.4 %;
+      `overallBenchmark.py` held-out TEST F1 0.979 / FPR 5.8 %,
+      **10/10 fault classes recall ≈ 1.0** (target was ≥ 8/10 at 0.8).
+- [x] 2.4/2.5 family classification rewritten as a shared label-free module,
+      **`diagnosis.py`** (used by `analyzeCausalGraphs.py` →
+      `causal_summaries.json.top_metrics`/`top_processes`, `ragExplainer.py`,
+      and both benchmarks — single source of truth):
+      - evidence tiers: distinct culprit comms (`fio`, `stress-ng-cpu/brk/futex/dentr`)
+        → OOM-kill event → `stress-ng-vm` identity → metric signatures
+        (futex max > 80k, locktime > 5e8, mem-PSI+major-faults → heap, swap ≥ 5 →
+        memory, sectors > 1e5 / I/O-PSI → I/O, CPU-PSI ≥ 15 → throttle) → unknown;
+      - windows are annotated from observed data only (no labels);
+      - measured: **window level 88.0 %** over all 191 fault windows and
+        **99.4 %** over the 159 windows overlapping the fault interval
+        (transition windows carry no fault evidence and classify `unknown`);
+      - episode level (the 17 merged anomaly reports): 10/11 fault episodes
+        correct — the one miss is the broken 2 s `memStressor2` run.
+- Old row-level heuristic (18 % accurate, sector/iowait thresholds fired on
+  system-wide counters) was deleted from `overallBenchmark.py`.
+- OOM fix queued: `probes.bt` now also counts `oom_kill_process` /
+  `__oom_kill_process` kprobes (`@oom_kills`, folded into `oom_kills` metric),
+  and the guarded `memStressor2` re-runs a *loop* of 2.5G allocations inside
+  `MemoryMax=2G / MemorySwapMax=256M`, so the cgroup OOM-kills it repeatedly
+  (~30–45 s of pressure + kill events instead of one 2 s blip).
+  Needs: preflight (validates new probes) + `run_fault.sh memStressor2` recollect.
+
+Next: Phase 3 daemon rewrite; Phase 4 `evaluate.py` / demo scripts; recollect
+`memStressor2` and run the final validation matrix once the probe change is
+confirmed by preflight.
+

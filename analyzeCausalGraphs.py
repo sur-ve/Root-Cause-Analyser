@@ -14,6 +14,8 @@ import pandas as pd
 import networkx as nx
 from typing import List, Dict, Tuple, Any, Optional
 
+import diagnosis
+
 NOISE_COMM_PREFIXES = (
     'swapper/',
     'bpftrace',
@@ -163,23 +165,8 @@ def parse_edge_nodes(edge: Dict[str, Any]) -> Tuple[str, str]:
 
 
 def extract_window_top_metrics(window_df: pd.DataFrame) -> Dict[str, Any]:
-    if window_df.empty:
-        return {}
-
-    candidate_metrics = [
-        'runtime', 'rq_time', 'futex_wait_time', 'futex_wait_count',
-        'oom_time', 'iowait_time', 'sector_count', 'locktime',
-        'cpu_some_avg10', 'mem_some_avg10', 'io_some_avg10',
-        'allocstall_count', 'major_fault_count', 'swap_in_count', 'swap_out_count', 'oom_kill_count'
-    ]
-    top_metrics = {}
-    for m in candidate_metrics:
-        if m in window_df.columns:
-            val = float(window_df[m].max())
-            if val > 0:
-                top_metrics[m] = round(val, 3)
-
-    return top_metrics
+    """Window-level metrics for one window (shared with the benchmarks)."""
+    return diagnosis.aggregate_window_metrics(window_df)
 
 
 def analyze_anomaly_graph(window_id: str, win_meta: Dict[str, Any], edges: List[Dict[str, Any]], window_df: pd.DataFrame) -> Tuple[nx.DiGraph, Dict[str, Any]]:
@@ -216,6 +203,7 @@ def analyze_anomaly_graph(window_id: str, win_meta: Dict[str, Any], edges: List[
         'candidate_roots': [],
         'sample_paths': [],
         'top_metrics': top_metrics,
+        'top_processes': diagnosis.top_process_comms(window_df),
         'labeled_causes': labeled_causes
     }
 

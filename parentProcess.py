@@ -58,7 +58,7 @@ STRESSORS = {
     'cpuStressor2': 'systemd-run --scope -p CPUQuota=20% stress-ng --cpu 2 --timeout 60s',
     'cpuStressor3': 'stress-ng --cpu 1 --cpu-load 50 --timeout 60s',
     'memStressor1': 'stress-ng --vm 2 --vm-bytes 70% --vm-keep --timeout 60s',
-    'memStressor2': 'stress-ng --vm 1 --vm-bytes 150% --timeout 60s',
+    'memStressor2': "systemd-run --scope -p MemoryMax=2G -p MemorySwapMax=256M bash -c 'for i in {1..15}; do stress-ng --vm 1 --vm-bytes 2500M --timeout 4s; done'",
     'memStressor3': 'stress-ng --brk 2 --timeout 60s',
     'lockStressor1': 'stress-ng --futex 4 --timeout 60s',
     'lockStressor2': 'stress-ng --dentry 4 --timeout 60s',

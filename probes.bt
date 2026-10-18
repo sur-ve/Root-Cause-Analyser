@@ -48,6 +48,16 @@ kretprobe:out_of_memory /@entry_oom[tid]/ {
 	delete(@entry_oom[tid]);
 }
 
+// cgroup (memcg) OOM kills do not go through out_of_memory(); oom_kill_process
+// and __oom_kill_process are reached by both the global and the memcg path.
+kprobe:oom_kill_process {
+	@oom_kills[comm] = count();
+}
+
+kprobe:__oom_kill_process {
+	@oom_kills[comm] = count();
+}
+
 tracepoint:sched:sched_stat_iowait {
 	@iowait_time[args.comm] = sum(args.delay);
 }
@@ -74,6 +84,7 @@ interval:s:3{
 	print(@futex_wait_time);
 	print(@futex_wait_count);
 	print(@oom_time);
+	print(@oom_kills);
 	print(@iowait_time);
 	print(@sector_count);
 	print(@locktime);
@@ -84,6 +95,7 @@ interval:s:3{
 	clear(@futex_wait_time);
 	clear(@futex_wait_count);
 	clear(@oom_time);
+	clear(@oom_kills);
 	clear(@iowait_time);
 	clear(@sector_count);
 	clear(@locktime);
